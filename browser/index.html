@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#121719">
+  <title>Laser Link · Local Design & Bluetooth</title>
+  <meta name="description" content="Create laser designs and send G-code to Laser-22504 from Chrome on this Mac over Bluetooth.">
+  <link rel="stylesheet" href="./style.css?v=0.7.5">
+  <link rel="stylesheet" href="./editor.css?v=0.6.0">
+  <script type="module" src="./app.mjs?v=0.9.0"></script>
+  <script type="module" src="./editor.bundle.js?v=0.10.0"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">✳</span><span>LASER <strong>LINK</strong></span></div>
+      <div class="local-badge"><span></span> LOCALHOST · MAC</div>
+    </header>
+
+    <section class="hero">
+      <p class="eyebrow">LASERVII L1 PRO 12W</p>
+      <h1>Your laser,<br><em>from this browser.</em></h1>
+      <p class="intro">Create a design on the 300 × 300 mm workspace, prepare its G-code, and send it to Laser-22504 over Bluetooth. Everything runs on this Mac.</p>
+      <div class="status" role="status" aria-live="polite">
+        <span id="statusDot" class="status-dot" data-kind="neutral"></span>
+        <span id="statusText">Checking browser…</span>
+      </div>
+    </section>
+
+    <nav class="mode-tabs" aria-label="Workspace mode">
+      <button id="modeCreate" type="button" aria-selected="true">Create a design</button>
+      <button id="modeSend" type="button" aria-selected="false">Connect &amp; send</button>
+      <button id="modeControl" type="button" aria-selected="false">Control</button>
+      <button id="modeProjects" type="button" aria-selected="false">Projects</button>
+    </nav>
+
+    <section id="creatorView" class="creator-view" aria-label="Design workspace">
+      <div class="creator-top">
+        <div><div class="panel-number">CREATION / 300 × 300 MM</div><h2>Design workspace</h2><p>Build and position your artwork before preparing a job.</p></div>
+        <div class="creator-actions">
+          <button id="newProject" type="button">New</button>
+          <button id="openProject" type="button">Open project</button>
+          <button id="saveProject" type="button">Save project</button>
+          <button id="undoEdit" type="button" aria-label="Undo">↶</button>
+          <button id="redoEdit" type="button" aria-label="Redo">↷</button>
+          <button id="openSettings" type="button" class="button button-primary">Next: settings</button>
+        </div>
+      </div>
+      <input id="projectInput" type="file" accept=".laserlink.json,application/json" hidden>
+      <input id="pictureInput" type="file" accept=".svg,image/svg+xml,image/png,image/jpeg,image/webp,image/gif" hidden>
+      <div class="creator-layout">
+        <div class="board-column">
+          <div class="board-toolbar"><span>Machine bed</span><span>300 × 300 mm · origin at lower left</span></div>
+          <div class="board-shell"><canvas id="editorCanvas" width="900" height="900" aria-label="300 by 300 millimetre design workspace with center guides at X150 Y150"></canvas></div>
+          <p class="tiny">Purple = captured item outline · orange = measured box · blue = jig pocket. Guides are not engraved.</p>
+          <div id="editorHint" class="editor-hint" role="status" aria-live="polite">Choose Picture, Text, Draw, or Code to add an object.</div>
+        </div>
+        <aside class="editor-sidebar">
+          <div class="tool-tabs" role="tablist" aria-label="Creation tools">
+            <button data-tool="picture" aria-selected="true" type="button">Picture</button>
+            <button data-tool="text" aria-selected="false" type="button">Text</button>
+            <button data-tool="material" aria-selected="false" type="button">Material</button>
+            <button data-tool="draw" aria-selected="false" type="button">Draw</button>
+            <button data-tool="code" aria-selected="false" type="button">Code</button>
+          </div>
+          <div class="tool-panel" data-panel="picture">
+            <h3>Picture</h3><p>Import an SVG, photo, or black-and-white design, then adjust how it engraves. SVGs are converted to pixels for the engraving job.</p>
+            <button id="addPicture" class="button button-secondary full" type="button">Import picture</button>
+            <label class="control-label">Filter</label>
+            <div class="filter-grid">
+              <button data-filter="original" aria-pressed="true" type="button">Original</button>
+              <button data-filter="gray" aria-pressed="false" type="button">Gray</button>
+              <button data-filter="strong" aria-pressed="false" type="button">Strong</button>
+              <button data-filter="sketch" aria-pressed="false" type="button">Sketch</button>
+              <button data-filter="dither" aria-pressed="false" type="button">Dither</button>
+            </div>
+            <label class="control-label" for="brightnessInput">Brightness <output id="brightnessValue">100%</output></label>
+            <input id="brightnessInput" type="range" min="20" max="180" value="100">
+            <label class="control-label" for="contrastInput">Contrast <output id="contrastValue">100%</output></label>
+            <input id="contrastInput" type="range" min="20" max="180" value="100">
+            <label class="control-label">Crop edges (%)</label>
+            <div class="four-fields"><label>Left<input id="cropLeft" type="number" min="0" max="80" value="0"></label><label>Top<input id="cropTop" type="number" min="0" max="80" value="0"></label><label>Right<input id="cropRight" type="number" min="0" max="80" value="0"></label><label>Bottom<input id="cropBottom" type="number" min="0" max="80" value="0"></label></div>
+            <label class="control-label" for="maskShape">Mask</label>
+            <select id="maskShape"><option value="rectangle">Rectangle</option><option value="circle">Circle</option><option value="triangle">Triangle</option><option value="star">Star</option><option value="heart">Heart</option></select>
+          </div>
+          <div class="tool-panel" data-panel="text" hidden>
+            <h3>Text</h3><p>Add a label to the workspace.</p>
+            <label class="control-label" for="textContent">Text</label><textarea id="textContent" rows="3" placeholder="Enter text"></textarea>
+            <label class="control-label" for="textSize">Height (mm)</label><input id="textSize" type="number" min="2" max="60" value="12">
+            <button id="addText" class="button button-secondary full" type="button">Add text</button>
+          </div>
+          <div class="tool-panel" data-panel="material" hidden>
+            <h3>Material</h3><p>Record the material for this project. Check a test piece before choosing power and speed.</p>
+            <label class="control-label" for="materialSelect">Material</label><select id="materialSelect"><option>Unspecified</option><option>Wood</option><option>Cardboard</option><option>Leather</option><option>Coated metal</option><option>Other</option></select>
+            <label class="control-label" for="materialNote">Notes</label><textarea id="materialNote" rows="3" placeholder="Material thickness, finish, test results"></textarea>
+          </div>
+          <div class="tool-panel" data-panel="draw" hidden>
+            <h3>Draw</h3><p>Draw freehand paths directly on the grid. They become part of the raster job.</p>
+            <button id="drawToggle" class="button button-secondary full" type="button" aria-pressed="false">Start drawing</button>
+            <label class="control-label" for="drawWidth">Stroke width (mm)</label><input id="drawWidth" type="number" min="0.2" max="10" step="0.2" value="1">
+          </div>
+          <div class="tool-panel" data-panel="code" hidden>
+            <h3>Code</h3><p>Generate a QR code or barcode and place it on the bed.</p>
+            <label class="control-label" for="codeFamily">Type</label><select id="codeFamily"><option value="qr">QR code</option><option value="barcode">Barcode</option></select>
+            <div id="qrFields"><label class="control-label" for="qrType">QR content</label><select id="qrType"><option value="text">Text</option><option value="url">URL</option><option value="wifi">Wi-Fi</option><option value="vcard">Business card</option></select>
+              <label id="qrValueLabel" class="control-label" for="qrValue">Text or URL</label><textarea id="qrValue" rows="3" placeholder="Enter text"></textarea>
+              <div id="wifiFields" hidden><label class="control-label" for="wifiName">Network name</label><input id="wifiName" type="text"><label class="control-label" for="wifiPassword">Password</label><input id="wifiPassword" type="text"></div>
+              <div id="vcardFields" hidden><label class="control-label" for="cardName">Name</label><input id="cardName" type="text"><label class="control-label" for="cardPhone">Phone</label><input id="cardPhone" type="tel"><label class="control-label" for="cardEmail">Email</label><input id="cardEmail" type="email"></div>
+            </div>
+            <div id="barcodeFields" hidden><label class="control-label" for="barcodeType">Barcode format</label><select id="barcodeType"><option value="CODE128">CODE128</option><option value="EAN13">EAN13</option><option value="UPC">UPC</option><option value="ITF14">ITF14</option></select><label class="control-label" for="barcodeValue">Value</label><input id="barcodeValue" type="text" placeholder="Enter code value"></div>
+            <button id="addCode" class="button button-secondary full" type="button">Generate &amp; place</button>
+          </div>
+          <div class="selection-panel">
+            <h3>Selected object</h3><p id="selectedSummary">Select an object on the grid to position it.</p>
+            <p>Drag the green corner handles to resize proportionally, or drag inside the image to move it.</p>
+            <div class="four-fields"><label>X (mm)<input id="objectX" type="number" min="0" max="300" step="0.1"></label><label>Y (mm)<input id="objectY" type="number" min="0" max="300" step="0.1"></label><label>W (mm)<input id="objectW" type="number" min="0.2" max="300" step="0.1"></label><label>H (mm)<input id="objectH" type="number" min="0.2" max="300" step="0.1"></label></div>
+            <label class="control-label" for="objectRotation">Rotation (°)</label><input id="objectRotation" type="number" min="-180" max="180" step="1">
+            <div class="selection-actions"><button id="flipHorizontal" type="button">Flip H</button><button id="flipVertical" type="button">Flip V</button><button id="deleteObject" type="button">Delete</button></div>
+          <button id="fitMeasured" class="measure-fit" type="button" disabled>Fit selection inside measured area</button>
+          </div>
+        </aside>
+      </div>
+      <div class="section-heading"><div><div class="panel-number">SAVED ON THIS MAC</div><h2>Recent projects</h2></div><button id="openProjectsFromCreate" type="button" class="button button-secondary">Manage projects</button></div>
+      <div id="recentProjectsGrid" class="projects-grid"><p>No recent projects yet.</p></div>
+      <div class="section-heading sd-library-heading"><div><div class="panel-number">ON THE LASER</div><h2>SD card files</h2><p id="recentSdStatus">Connect the laser to browse its card.</p></div><button id="recentSdRefresh" type="button" class="button button-secondary" disabled>Refresh SD card</button></div>
+      <div id="recentSdFiles" class="projects-grid" aria-label="Files on the laser SD card"></div>
+    </section>
+
+    <section id="projectsView" class="projects-view" aria-label="Manage projects" hidden>
+      <div class="section-heading"><div><div class="panel-number">LOCAL LIBRARY</div><h2>Manage projects</h2><p>Recent designs saved in this browser on this Mac.</p></div><div class="project-actions"><button id="selectProjects" type="button">Select</button><button id="deleteProjects" type="button" hidden>Delete selected</button></div></div>
+      <div id="projectsGrid" class="projects-grid"><p id="projectsEmpty">No saved projects yet. Create a design to start your local gallery.</p></div>
+      <p id="projectsStatus" class="editor-hint" role="status"></p>
+      <p class="tiny">Projects are stored in this Chrome profile. Use Save project in the editor for a portable file backup.</p>
+      <div class="section-heading sd-library-heading"><div><div class="panel-number">ON THE LASER</div><h2>SD card files</h2><p id="projectsSdStatus">Connect the laser to browse its card.</p></div><button id="projectsSdRefresh" type="button" class="button button-secondary" disabled>Refresh SD card</button></div>
+      <div id="projectsSdFiles" class="projects-grid" aria-label="Files on the laser SD card"></div>
+    </section>
+
+    <section id="controlView" class="control-view" aria-label="Manual machine control" hidden>
+      <div class="section-heading"><div><div class="panel-number">MANUAL CONTROL</div><h2>Control</h2><p>Read position and jog the laser head while the controller is idle.</p></div><div class="project-actions"><button id="refreshPosition" type="button">Refresh position</button><button id="cancelJog" type="button" disabled>Cancel movement</button></div></div>
+      <div class="control-layout">
+        <div class="control-card">
+          <div class="position-display"><div><span>X POS</span><strong id="xPosition">—</strong></div><div><span>Y POS</span><strong id="yPosition">—</strong></div></div>
+          <p id="positionKind" class="tiny">Connect Laser-22504 to read its GRBL position.</p>
+          <div class="origin-setup">
+            <h3>Home with switches</h3>
+            <p>After the head was moved with power off, use Home to restore the machine's position. Homing moves the head toward its limit switches. MKSLaser has homed this machine successfully before.</p>
+            <label class="jog-ack"><input id="homeArmed" type="checkbox"> The full travel area is clear and I can reach the physical stop.</label>
+            <button id="homeMachineTop" type="button" disabled>Home machine with switches</button>
+            <p class="tiny">The center ⌂ button also starts homing. When it finishes, this app sets work X0 Y0 at the stopped position.</p>
+          </div>
+          <div class="origin-setup">
+            <h3>Set the work origin</h3>
+            <p>If you place the head by hand at the lower-left work corner, this sets a work zero without motion. It does not restore Grbl's machine position or verify its limit switches.</p>
+            <label class="jog-ack"><input id="atWorkOrigin" type="checkbox"> The head is physically at the lower-left X0 Y0 corner.</label>
+            <button id="setWorkZero" type="button" disabled>Set this position to X0 Y0</button>
+            <p id="originStatus" class="tiny">Work origin has not been set in this connection.</p>
+          </div>
+          <h3>Move distance</h3><div class="segmented" id="jogDistances"><button type="button" data-distance="1" aria-pressed="true">1 mm</button><button type="button" data-distance="10" aria-pressed="false">10 mm</button><button type="button" data-distance="50" aria-pressed="false">50 mm</button></div>
+          <h3>Move speed</h3><div class="segmented" id="jogSpeeds"><button type="button" data-speed="300" aria-pressed="true">Slow</button><button type="button" data-speed="800" aria-pressed="false">Medium</button><button type="button" data-speed="1500" aria-pressed="false">Fast</button></div>
+          <label class="jog-ack"><input id="jogArmed" type="checkbox"> I have checked the work origin and cleared the travel area.</label>
+          <h3>Move</h3><div class="jog-grid" aria-label="Jog the laser head">
+            <button type="button" data-jog-x="-1" data-jog-y="1" aria-label="Jog up left">↖</button><button type="button" data-jog-x="0" data-jog-y="1" aria-label="Jog up">↑</button><button type="button" data-jog-x="1" data-jog-y="1" aria-label="Jog up right">↗</button>
+            <button type="button" data-jog-x="-1" data-jog-y="0" aria-label="Jog left">←</button><button id="homeMachine" type="button" aria-label="Home machine" disabled>⌂</button><button type="button" data-jog-x="1" data-jog-y="0" aria-label="Jog right">→</button>
+            <button type="button" data-jog-x="-1" data-jog-y="-1" aria-label="Jog down left">↙</button><button type="button" data-jog-x="0" data-jog-y="-1" aria-label="Jog down">↓</button><button type="button" data-jog-x="1" data-jog-y="-1" aria-label="Jog down right">↘</button>
+          </div>
+          <button id="moveToCenter" class="center-button" type="button" disabled>Move to bed center</button>
+          <p id="centerTarget" class="tiny">Set X0 Y0 at the lower-left corner first. Center uses work coordinates.</p>
+          <p id="controlHint" class="control-hint" role="status">Connect the laser to enable movement. Every jog turns the laser off first.</p>
+        </div>
+        <div class="control-card device-details">
+          <h3>Device details</h3><dl><dt>Bluetooth mode</dt><dd>Feasycom FFF0 UART</dd><dt>Canvas size</dt><dd>300 × 300 mm</dd><dt>Length unit</dt><dd>mm</dd><dt>Controller</dt><dd id="controllerSettings">Not connected</dd></dl>
+          <h3>Additional controls</h3><p>The phone shows Light, Locate, and Cool controls. Their exact wiring and behavior are not established from the screenshots. They stay unavailable here until verified on this machine.</p>
+          <div class="unavailable-controls"><button type="button" disabled>Light</button><button type="button" disabled>Locate</button><button type="button" disabled>Cool</button></div>
+        </div>
+      </div>
+      <div class="alignment-grid">
+        <section class="control-card" aria-labelledby="jigTitle">
+          <h3 id="jigTitle">Jig profiles</h3>
+          <p class="tiny">The pocket origin uses absolute machine X/Y after switch homing. Designs use the pocket's lower-left corner as canvas X0 Y0.</p>
+          <label class="alignment-label">Active jig<select id="jigSelect"><option value="">No jig · bed origin</option></select></label>
+          <div class="alignment-fields">
+            <label>Jig name<input id="jigName" type="text" maxlength="80" placeholder="Golf club jig"></label>
+            <label>Machine origin X (mm)<input id="jigOriginX" type="number" min="0" max="300" step="0.001"></label>
+            <label>Machine origin Y (mm)<input id="jigOriginY" type="number" min="0" max="300" step="0.001"></label>
+            <label>Pocket width (mm)<input id="jigWidth" type="number" min="0.2" max="300" step="0.001"></label>
+            <label>Pocket height (mm)<input id="jigHeight" type="number" min="0.2" max="300" step="0.001"></label>
+          </div>
+          <div class="alignment-actions"><button id="saveJig" type="button">Save jig</button><button id="deleteJig" type="button" disabled>Delete selected jig</button></div>
+          <p id="jigStatus" class="control-hint" role="status">Select or save a jig. Home before using its machine coordinates.</p>
+        </section>
+        <section class="control-card" aria-labelledby="measureTitle">
+          <h3 id="measureTitle">Jog and measure</h3>
+          <p class="tiny">Home, jog to the object's top-left corner, capture A, then jog to its bottom-right corner and capture B. Each capture reads a fresh GRBL machine position.</p>
+          <div class="alignment-actions"><button id="capturePointA" type="button" disabled>Set Point A</button><button id="capturePointB" type="button" disabled>Set Point B</button><button id="clearMeasurement" type="button">Clear</button></div>
+          <p id="measureStatus" class="control-hint" role="status">No measurement captured.</p>
+          <p class="tiny">The orange box appears in the design canvas. Select artwork there and use Fit selection inside measured area.</p>
+        </section>
+        <section class="control-card" aria-labelledby="outlineTitle">
+          <h3 id="outlineTitle">Capture item outline</h3>
+          <p class="tiny">Home, then jog the head to points around the item's perimeter. Capture each point in order. The purple outline appears on the design grid so you can place artwork over it. The laser does not detect edges automatically.</p>
+          <div class="alignment-actions"><button id="captureOutlinePoint" type="button" disabled>Capture edge point</button><button id="undoOutlinePoint" type="button" disabled>Undo point</button><button id="closeOutline" type="button" disabled>Close outline</button><button id="clearOutline" type="button" disabled>Clear outline</button><button id="viewCapturedOutline" type="button" disabled>View on design grid</button></div>
+          <p id="outlineStatus" class="control-hint" role="status">No outline captured.</p>
+          <p class="tiny">This is a visual guide only. It does not become engraving G-code. Capture again after homing, changing jig, or reconnecting.</p>
+        </section>
+      </div>
+      <section class="control-card frame-card" aria-labelledby="frameTitle">
+        <h3 id="frameTitle">Physical low-power framing</h3>
+        <p class="tiny">Home and check the work area first. PWM is capped at 1% of the controller's $30 value and at S10. Low power can still mark sensitive material; test on scrap under supervision.</p>
+        <div class="alignment-fields frame-fields"><label>Frame PWM (S value)<input id="frameSValue" type="number" min="1" max="10" step="1" value="5"></label><label>Traverse speed (mm/min)<input id="frameFeed" type="number" min="100" max="4000" step="100" value="3000"></label></div>
+        <label class="jog-ack"><input id="frameArmed" type="checkbox"> The machine is homed, the path is clear, and I am watching the laser with its physical stop accessible.</label>
+        <div class="alignment-actions"><button id="frameDesign" type="button" disabled>Trace design box</button><button id="frameMeasurement" type="button" disabled>Trace measured box</button><button id="frameContour" type="button" disabled>Trace design contours</button><button id="stopFrame" type="button" disabled>Stop framing</button></div>
+        <p id="frameStatus" class="control-hint" role="status">Framing is disabled until switch homing and controller settings are verified.</p>
+      </section>
+    </section>
+
+    <div id="settingsDialog" class="settings-overlay" hidden>
+      <section class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="settings-head"><div><div class="panel-number">PARAMETER SETTINGS</div><h2 id="settingsTitle">Prepare engraving</h2></div><button id="closeSettings" type="button" aria-label="Close settings">×</button></div>
+        <div class="settings-grid">
+          <label>File name<input id="jobFileName" type="text" value="laser-link-job.nc"></label>
+          <label>Laser power (%)<input id="laserPower" type="number" min="1" max="100" value="5"></label>
+          <label>Work speed (mm/min)<input id="workSpeed" type="number" min="100" max="12000" value="1000"></label>
+          <label>Number of engravings<input id="passes" type="number" min="1" max="10" value="1"></label>
+          <label>Frame power note (%)<input id="framePower" type="number" min="1" max="10" value="5"><small>Saved with the project. The on-screen preview does not fire the laser; physical framing uses the capped S value in Control.</small></label>
+          <label>Laser mode<select id="laserMode"><option value="M4">M4 · dynamic power</option></select></label>
+          <label>Raster resolution<select id="resolution"><option value="0.2">0.2 mm / pixel · detailed</option><option value="0.3" selected>0.3 mm / pixel · balanced</option><option value="0.4">0.4 mm / pixel · faster</option></select></label>
+          <label>Maximum S value ($30)<input id="sMaxInput" type="number" min="1" max="100000" value="1000"><small id="machineConfig">Connect the laser to read its actual $30 and $32 settings.</small></label>
+          <label class="toggle-field"><input id="airAssist" type="checkbox"><span>Air assist (M8 / M9)</span><small>Use only if an air pump is wired to this controller.</small></label>
+        </div>
+        <p id="parameterError" class="parameter-message" role="status" aria-live="polite">Screenshot example: 5% power, 1000 mm/min, one pass, M4.</p>
+        <div class="settings-actions"><button id="previewFrame" class="button button-secondary" type="button">Preview frame</button><button id="downloadGcode" class="button button-secondary" type="button">Download .nc</button><button id="prepareJob" class="button button-primary" type="button">Prepare to send</button></div>
+      </section>
+    </div>
+
+    <div id="sendView" hidden>
+
+    <section class="workbench" aria-label="Laser controls">
+      <article class="panel device-panel">
+        <div class="panel-number">01 / CONNECTION</div>
+        <h2>Connect the laser</h2>
+        <p class="panel-copy">Turn on the machine, close the native Laser Link app, and disconnect MKSLaser on your phone. Chrome will ask you to choose the nearby device.</p>
+        <div class="device-card">
+          <span class="device-icon" aria-hidden="true">◉</span>
+          <div><span class="micro-label">DEVICE</span><strong id="deviceName">No laser connected</strong></div>
+        </div>
+        <button id="connectButton" class="button button-primary" type="button">Connect laser</button>
+        <p class="tiny">Use Google Chrome on this Mac. The Bluetooth chooser requires a click.</p>
+      </article>
+
+      <article class="panel job-panel">
+        <div class="panel-number">02 / JOB FILE</div>
+        <h2>Load your G-code</h2>
+        <p class="panel-copy">Use a job prepared in the design workspace, or choose an .nc, .gc, or .gcode file exported for this GRBL laser.</p>
+        <div class="file-card">
+          <span class="file-icon" aria-hidden="true">▤</span>
+          <div><span class="micro-label">SELECTED FILE</span><strong id="jobName">No file selected</strong><small id="jobMeta">Up to 20 MB · ASCII G-code</small></div>
+        </div>
+        <input id="fileInput" type="file" accept=".nc,.gc,.gcode" hidden>
+        <button id="chooseButton" class="button button-secondary" type="button">Choose job file</button>
+        <p class="tiny">Preview the job in LightBurn before starting it here.</p>
+      </article>
+    </section>
+
+    <section class="run-panel" aria-labelledby="runHeading">
+      <div class="run-top"><div><div class="panel-number">03 / MACHINE CONTROL</div><h2 id="runHeading">Run the job</h2></div><span class="caution">LIVE LASER CONTROL</span></div>
+      <div class="progress-row"><span>Commands acknowledged</span><strong id="progressText">0 / 0</strong></div>
+      <progress id="progress" value="0" max="1">0%</progress>
+      <div class="actions">
+        <button id="startButton" class="button button-primary" type="button" disabled>Start job</button>
+        <button id="pauseButton" class="button button-secondary" type="button" disabled>Pause</button>
+        <button id="abortButton" class="button button-danger" type="button" disabled>Abort</button>
+      </div>
+      <p id="senderHint" class="sender-hint" role="status" aria-live="polite">Connect the laser to send a job.</p>
+      <div id="livePowerControls" class="live-power-controls" hidden>
+        <label for="livePowerPercent">Power while paused</label>
+        <div class="live-power-row"><input id="livePowerPercent" type="number" min="10" max="200" step="10" value="100"><span>% of prepared power</span><button id="applyLivePower" class="button button-secondary" type="button">Apply power</button></div>
+        <p id="livePowerStatus" class="tiny" role="status">100% uses the power in the prepared job. GRBL allows 10–200%; apply, then press Resume. This does not change the saved design.</p>
+      </div>
+      <div class="recovery-actions"><button id="recoverButton" class="button button-secondary" type="button" hidden>Open Control to Home</button><button id="editJobButton" class="button button-secondary" type="button">Edit power &amp; rebuild job</button></div>
+      <p class="run-note">Starting a job can move and fire the laser. Stay with the machine and keep its physical stop control accessible. Keep this tab open until the machine is idle.</p>
+    </section>
+
+    <section class="run-panel" aria-labelledby="sdHeading">
+      <div class="run-top"><div><div class="panel-number">04 / SD CARD</div><h2 id="sdHeading">Files on the laser</h2></div></div>
+      <p class="panel-copy">Browse the inserted card over Bluetooth. To copy a job onto the card, power off the laser, place the card in a Mac card reader, and select it below.</p>
+      <div class="sd-actions">
+        <button id="sdRefreshButton" class="button button-secondary" type="button" disabled>Browse card in laser</button>
+        <button id="sdSelectButton" class="button button-secondary" type="button">Select card in Mac</button>
+        <button id="sdCardRefreshButton" class="button button-secondary" type="button" disabled>Browse selected card</button>
+      </div>
+      <p id="sdCardName" class="tiny">No card folder selected.</p>
+      <p id="sdStatus" class="sender-hint" role="status" aria-live="polite">Connect the laser or select its card in a Mac card reader.</p>
+      <ul id="sdFiles" class="sd-files" aria-label="G-code files on the laser SD card"></ul>
+      <div class="sd-upload">
+        <label for="sdFilename">SD filename</label>
+        <input id="sdFilename" type="text" placeholder="design.nc" autocomplete="off" spellcheck="false">
+        <button id="sdUploadButton" class="button button-secondary" type="button" disabled>Copy prepared job to card</button>
+        <p id="sdUploadStatus" class="tiny" role="status" aria-live="polite">Copies the current G-code file to the selected card without starting the laser. Check its settings before running it.</p>
+      </div>
+    </section>
+
+    <section class="telemetry" aria-label="Controller information">
+      <div class="telemetry-head"><div><div class="panel-number">CONTROLLER</div><h2>Live status</h2></div><span class="telemetry-pill">GRBL</span></div>
+      <div id="controllerText" class="controller-text">Waiting for controller</div>
+      <details><summary>Connection log</summary><div id="log" class="log" aria-live="polite"></div></details>
+    </section>
+    </div>
+
+    <footer>Laser Link runs only on localhost. Commands go directly to Laser-22504 over Bluetooth; card copies use a card reader on this Mac.</footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,88 @@
+# Laser Link for Mac and browser
+
+A local browser design editor and Bluetooth job sender for the Laservii L1 Pro 12W, configured for this machine's advertised name, `Laser-22504`. A separate native Mac sender is also included.
+
+## Run in a browser on localhost
+
+Use Google Chrome on this Mac. Safari does not offer the Web Bluetooth access this page needs. Start the local server:
+
+```sh
+./serve-browser.sh
+```
+
+Open **http://localhost:8766** in Chrome. The **Create a design** tab works without the laser. Import an SVG, PNG, JPEG, WebP, or GIF, add text or a freehand drawing, or generate a QR code or barcode. SVGs are rendered to a local PNG on import because the engraving job is raster based; the original vector paths are not retained. Position objects on the 300 × 300 mm grid, then click **Next: settings** to preview the design bounds, download an `.nc` job, or prepare it for Bluetooth sending. Designs autosave into the **Recent projects** and **Projects** gallery in this Chrome profile. Use **Save project** to download an editable `.laserlink.json` backup that can be moved to another browser or Mac. The detailed correspondence with the phone screenshots is in [SCREENSHOTS.md](/Users/pierre/Documents/Projects/Active/laser/SCREENSHOTS.md).
+
+To connect, close the native Laser Link app and disconnect MKSLaser on the phone. Open **Connect & send**, click **Connect laser**, and select `Laser-22504` in Chrome's Bluetooth picker. You can send a job generated in the editor or load an exported `.nc`, `.gc`, or `.gcode` file. The page asks for confirmation before sending commands. Keep the tab open and watch the machine until the controller reports idle. **Pause** stops the sender first, sends GRBL feed hold through a confirmed Bluetooth write, and checks for `Hold:0` (fully stopped). If it cannot confirm the stop, the page says so and keeps the sender paused. **Resume** checks for `Run` or `Idle` before sending more commands. **Abort** resets the controller and requires homing before another job. The updated Pause behavior still needs a supervised machine test.
+
+If Chrome lists two `Laser-22504` devices, choose the one with address `DC:0D:30:5A:57:E8`. To test sending without motion or laser output, open `examples/connection-test.nc`; it contains only the GRBL `$G` status command.
+
+For a supervised Pause check, `examples/pause-motion-test.nc` turns the laser off with `M5` and moves from work X0 to X30 and back at 100 mm/min. Home first, clear at least 30 mm in +X, then press **Pause** during motion. The page should report `Hold:0` and the head should stop. If the head keeps moving, use the machine's physical stop or **Abort**, then report the displayed controller status. This test has not yet been run on the L1 Pro.
+
+The page and job file stay on this Mac. The local server serves static files only; Bluetooth communication happens directly between Chrome and the engraver. Chrome requires a user click to grant Bluetooth access, so this browser version cannot connect automatically on page load. The editor defaults of 5% power, 1000 mm/min, one pass, and M4 reflect the phone screenshot and are examples, not material settings verified for this machine. Direct sending of a generated job requires the controller's `$30` to match its maximum S value and `$32=1` for laser mode. The on-screen **Preview frame** does not move or fire the laser. Air assist is optional and emits `M8`/`M9` only if you enable it and have a pump wired to the controller. Frame power is saved with the project but is not used by the on-screen preview.
+
+In the design workspace, select an image or other object and drag one of its four green corner handles to resize it. The opposite corner stays fixed and the original proportions are preserved. Drag inside the object to move it. The size and position fields remain available for exact adjustments, and the new size participates in undo and redo.
+
+The editor shows dashed center lines and a dot at work X150/Y150 on the 300 × 300 mm bed. These guides are for placement only; they are excluded from the engraving raster and downloaded G-code.
+
+**Files on the laser** has **Browse card in laser**, which uses the read-only Makerbase `[ESP200]` and `[ESP210]` commands over Bluetooth. This was tested on Laser-22504 and listed `/DLC32001.nc` from its inserted card. The app now refreshes the list when an idle laser connects and shows the file names in **Recent projects** and **Projects**, labeled **SD card files**. The most recent successful Bluetooth listing is kept in this browser after disconnect and marked with its read time; refresh after changing cards. SD G-code is listed separately because it is not an editable local project and this Bluetooth implementation cannot read file contents from the card. To browse and copy files reliably, power off the laser, remove its TF/microSD card, and insert it into a Mac card reader. Click **Select card in Mac** and choose the card's top-level folder in Chrome. **Browse selected card** lists `.nc`, `.gc`, and `.gcode` files, including files in subfolders up to two levels deep. **Copy prepared job to card** writes the current G-code job to the card's top level, refuses to replace an existing filename, and checks the written file size. Eject the card from macOS before returning it to the laser. The copy does not start the machine; check the job's power, speed, and coordinate settings before running it. The L1 Pro is [listed by Laservii as having no Wi-Fi](https://eu.laservii.com/es/products/l1-pro-laser-engraver), and this app has no verified Bluetooth file-write protocol for an inserted card, so remote upload remains unavailable.
+
+If a test mark is too faint, press **Pause** and wait for the controller to report Hold. **Power while paused** sends GRBL's realtime spindle override commands. Enter 10–200 in steps of 10, relative to the power already programmed in the job, press **Apply power**, and wait for the controller's `Ov` status to confirm the requested value. Then press **Resume**. This does not change the saved project's power setting, and support for the override on this exact firmware still needs a supervised laser-off verification. For a larger change, **Abort job & edit design power** explicitly ends the job and asks for confirmation. Prepare a new job and Home with switches before restarting from the beginning; the former job cannot Resume because GRBL acknowledgements are not proof that queued movements have completed. Imported G-code needs to be edited in its source application and loaded again. You can also click **Abort**, wait for the head to stop, and inspect the machine. The sender reads the controller's reset or Alarm state and keeps further jobs locked until you **Home with switches** again. Use **Edit power & rebuild job** to change the laser power, then **Prepare to send** to create new G-code. Changing the design or power invalidates the old prepared job, so the old low-power commands cannot be started again by accident. A hard-limit alarm (`ALARM:1`) also requires checking the machine and homing before another job. The green selected-object outline rotates with the artwork.
+
+The **Control** tab reads the controller position. If the head was moved by hand while power was off, the reported coordinates can be stale. **Home** uses Grbl `$H` to seek the machine's limit switches and restore its machine position; it is enabled only when the connected controller reports homing enabled, is Idle or in Alarm, and the operator checks that the full travel area is clear. When Idle, the app turns the laser off with `M5` first. In Alarm, Grbl blocks normal G-code, so the app uses `$H` directly. Homing is blocked if Grbl reports a nonempty `$N` startup script, because Grbl runs startup scripts after homing. After successful homing, the app selects G54, clears any temporary G92 offset, and sets the stopped head position to work X0/Y0 using `G10 L20 P1 X0 Y0`. Grbl's machine coordinates may still differ from 0,0. The app reserves the homing pull-off distance from its work travel limit. **Set this position to X0 Y0** does the same work-offset setup without moving, but it does not restore machine coordinates after a powered-off manual move. A manual origin enables imported G-code and jogging; browser-generated jobs, jig alignment, measurement, and physical framing require switch homing and verified travel limits. Manual jog buttons offer 1, 10, or 50 mm steps and three speeds. **Move to bed center** uses the established work origin and available travel at the selected jog speed. Movement also requires reported travel limits and work position, an idle controller, and the travel-area checkbox. Each movement sends `M5` before jogging. If the head is moved by hand again, home the machine again before moving through the app. **Light**, **Locate**, and **Cool** stay disabled until their hardware behavior is verified. The Bluetooth mode, canvas size, and length unit appear in device details; phone-only language, legal, and cache settings do not apply to this local site.
+
+On 13 October 2026, a supervised live test connected to `Laser-22504`, read GRBL's idle status and 300 × 300 mm travel settings, and sent a 1 mm +X jog at 300 mm/min after `M5`. The controller reported X=1 mm, and the person at the machine confirmed correct motion with the laser light off. Additional Y movement during the session came from the user's own Control-page input. The browser was disarmed and disconnected afterward. No engraving or vector cutting was tested in that session.
+
+On 13 October 2026, with the operator at the machine and the travel area clear, the browser sent `M5`, checked that `$N` startup scripts were empty, and ran one `$H` homing cycle. GRBL returned to `Idle` and reported `MPos:0.000,0.000` and `WCO:0.000,0.000` after the app set work X0/Y0. The operator confirmed that the head stopped at the lower-left corner and the laser light stayed off throughout. Home and jog controls were disarmed afterward. This verifies homing on this machine; no engraving job was sent.
+
+The browser editor and sender have tests. The bundled editor is already built; Node is only needed to change its source:
+
+```sh
+npm ci
+npm run build:browser
+npm test
+```
+
+## Jig alignment, measurement, and physical framing
+
+The browser **Control** tab now has reusable jig profiles. A profile stores its name, the pocket's lower-left `origin_x`/`origin_y` in **absolute GRBL machine millimetres**, and its maximum width and height. Profiles are kept in this browser's local storage. After **Home with switches**, choose a jig; the editor's canvas X0/Y0 is translated to that pocket origin for newly generated jobs. The blue dashed rectangle shows the pocket boundary. The app checks that design and frame paths remain inside both the pocket and the controller's reported travel. A selected jig needs a fresh homing cycle and a reported work offset; an offline download cannot use an unverified machine-coordinate jig.
+
+To measure a workpiece, home and jog the head to one corner, then click **Set Point A**. Jog to the opposite corner and click **Set Point B**. Each button requests a fresh GRBL `?` report and records the machine X/Y position only while Idle. The displayed width and height are the absolute coordinate differences. An orange temporary box appears on the canvas, relative to the active jig if one is selected. Select an object and click **Fit selection inside measured area** to scale it proportionally; review the placement before preparing a job. Measurement clears when the jig changes, the laser disconnects, or another homing cycle starts.
+
+For an irregular item, use **Capture item outline** in Control. After homing, jog the head to successive points around the physical edge and click **Capture edge point** at each position. Each capture reads a fresh Idle GRBL machine position, checks the active jig and travel limits, and maps that point onto the design canvas. Capture at least three points and click **Close outline**; a purple polygon stays visible while you position artwork over it. **Undo point** and **Clear outline** let you correct or restart the guide. Up to 100 points are supported. The guide is session-only, clears when homing, the jig, or the coordinate reference changes, and is never included in generated engraving or contour G-code. This is manual perimeter digitizing: the laser has no sensor to discover an edge just by moving over it. Accuracy depends on where the head is placed for each point and on homing and jig calibration. A camera or edge sensor would be needed for automatic shape capture.
+
+For a physical preview, home, check the work area, choose a frame PWM `S` value and feed rate, and tick the framing checkbox. **Trace design box** follows the design bounds; **Trace measured box** follows the captured workpiece rectangle; **Trace design contours** follows retained SVG geometry, freehand paths, and pixel-derived text outlines. SVGs that contain unsupported geometry or multiple subpaths in one `<path>` can still engrave as raster images but cannot be contour traced. Photos, QR codes, and barcodes do not provide a traceable contour. The frame path uses `M5` before travel, `M4` at the selected `S` value for `G1` motion, and `M5` at the end. Its PWM is capped at both `S10` and 1% of the controller's `$30`, and its feed is capped by `$110`/`$111`. **Stop framing** sends a GRBL reset and locks motion until homing again. A Bluetooth failure cannot guarantee command delivery; use the machine's physical stop if it continues moving. Even a low PWM value may mark sensitive material, so verify on scrap with the machine attended.
+
+The browser continues to stream through its existing Web Bluetooth GRBL transport, checking each command's `ok` response and waiting for Idle after the final `M5`. There is no Python process or serial-port backend in this project. These new physical framing routines have unit tests and a browser UI check, but have **not** yet been run on the L1 Pro hardware.
+
+## Native Mac app
+
+The app discovered the engraver's Feasycom FSC-BT9101 Bluetooth module, connected to its FFF0 transparent UART service, and verified the attached GRBL controller with read-only `?` and `$G` queries. Its job sender also completed a read-only command, acknowledgement, and idle check. A physical engraving job has not yet been run through this app.
+
+## Use
+
+1. Turn on `Laser-22504` near the Mac. Disconnect the MKSLaser phone app from the engraver.
+2. Open [Laser Link.app](Laser%20Link.app). Grant Bluetooth access if macOS asks. The app scans and connects automatically; the status should show **GRBL link verified** or **Bluetooth sender verified**.
+3. Create and preview your design in LightBurn. Choose **File > Save GCode** and save G-code for this GRBL laser as `.nc`, `.gc`, or `.gcode`.
+4. In Laser Link, click **Open Job…**, choose the exported file, then click **Start Job**. The app asks for confirmation before sending commands that can move and fire the laser.
+5. Keep the app open and watch the machine until it reports **Job complete. Machine is idle.** Use **Pause/Resume** or **Abort** if needed. After an abort, check the machine and disconnect/reconnect before starting another job.
+
+The native Laser Link app sends existing G-code jobs. The new browser editor also creates G-code from images and designs. Neither opens MKSLaser phone project files. Files sent by either app must contain ASCII G-code and be at most 20 MB. A generated engraving has not yet been physically run through the browser app. If Bluetooth disconnects while a job is running, use the machine's physical stop control.
+
+## Build
+
+On a Mac with the Xcode command line tools:
+
+```sh
+./build.sh
+open "Laser Link.app"
+```
+
+The app writes a diagnostic log to `bluetooth-report.txt` beside the app. It logs this laser's Bluetooth details and controller replies; it does not include other nearby devices in the report.
+
+## Sources
+
+- [Laservii L1 Pro product information](https://us.laservii.com/products/l1-pro-laser-engraver)
+- [Feasycom FSC-BT9101 transparent UART service](https://document.feasycom.com/docs/DataModule/BT910x_EN/General/latest/at-cmd-set.html)
+- [LightBurn Save GCode documentation](https://docs.lightburnsoftware.com/latest/Reference/UI/FileMenu/)
+- [GRBL laser mode and M4 behavior](https://github.com/gnea/grbl/blob/master/doc/markdown/laser_mode.md)
+- [GRBL settings, including $30](https://github.com/gnea/grbl/blob/master/doc/markdown/settings.md)

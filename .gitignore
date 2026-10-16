@@ -1,0 +1,8 @@
+.DS_Store
+.build/
+Laser Link.app/
+node_modules/
+bluetooth-report.txt
+*.log
+.env
+.env.*
