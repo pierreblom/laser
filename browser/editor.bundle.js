@@ -5616,6 +5616,30 @@ function rotatedCorner(object, corner) {
     y: centerY + sx * object.w / 2 * s + sy * object.h / 2 * c
   };
 }
+function rotatedBounds(object, margin = 0) {
+  const angle = (object.rotation || 0) * Math.PI / 180;
+  const c = Math.abs(Math.cos(angle)), s = Math.abs(Math.sin(angle));
+  const width = (object.w + 2 * margin) * c + (object.h + 2 * margin) * s;
+  const height = (object.w + 2 * margin) * s + (object.h + 2 * margin) * c;
+  const centerX = object.x + object.w / 2, centerY = object.y + object.h / 2;
+  return {
+    minX: centerX - width / 2,
+    minY: centerY - height / 2,
+    maxX: centerX + width / 2,
+    maxY: centerY + height / 2,
+    width,
+    height
+  };
+}
+function moveRotatedBounds(object, x, y, bed = 300, margin = 0) {
+  const bounds = rotatedBounds(object, margin);
+  if (bounds.width > bed + 1e-3 || bounds.height > bed + 1e-3) {
+    throw new Error("The rotated artwork is larger than the machine bed. Reduce its size.");
+  }
+  const nextX = Math.max(0, Math.min(x, bed - bounds.width));
+  const nextY = Math.max(0, Math.min(y, bed - bounds.height));
+  return { x: object.x + nextX - bounds.minX, y: object.y + nextY - bounds.minY };
+}
 function hitResizeCorner(point, object, radius) {
   if (!object || !Number.isFinite(radius) || radius <= 0) return null;
   return Object.keys(CORNER_SIGNS).find((corner) => {
@@ -5644,13 +5668,7 @@ function resizeFromCorner(object, corner, pointer, bed = 300) {
     return { x: centerX - w / 2, y: centerY - h / 2, w, h };
   };
   const atOne = geometryAt(1);
-  const candidates = [
-    ...Object.keys(CORNER_SIGNS).map((name) => rotatedCorner({ ...atOne, rotation: object.rotation }, name)),
-    { x: atOne.x, y: atOne.y },
-    { x: atOne.x + atOne.w, y: atOne.y },
-    { x: atOne.x, y: atOne.y + atOne.h },
-    { x: atOne.x + atOne.w, y: atOne.y + atOne.h }
-  ];
+  const candidates = Object.keys(CORNER_SIGNS).map((name) => rotatedCorner({ ...atOne, rotation: object.rotation }, name));
   let maxScale = Math.min(bed / object.w, bed / object.h);
   for (const candidate of candidates) {
     const vx = candidate.x - anchor.x, vy = candidate.y - anchor.y;
@@ -5871,6 +5889,8 @@ function extractSvgContours(svg, width, height) {
 var $ = (id) => document.getElementById(id);
 var BED = 300;
 var canvas = $("editorCanvas");
+var rulerX = $("bedRulerX");
+var rulerY = $("bedRulerY");
 var ctx = canvas.getContext("2d", { willReadFrequently: true });
 var imageCache = /* @__PURE__ */ new Map();
 var processedCache = /* @__PURE__ */ new Map();
@@ -5882,6 +5902,7 @@ var pointerAction = null;
 var framePreview = false;
 var machineSettings = null;
 var renderQueued = false;
+var rulerStep = 0;
 var autosaveTimer = null;
 var saveQueue = Promise.resolve();
 var selectingProjects = false;
@@ -5917,6 +5938,7 @@ function invalidatePreparedJob(parameters = project.parameters) {
 }
 function commit() {
   invalidatePreparedJob();
+  window.dispatchEvent(new Event("laserlink:design-changed"));
   history = history.slice(0, historyIndex + 1);
   history.push(snapshot());
   if (history.length > 30) history.shift();
@@ -5930,6 +5952,7 @@ function restore(index) {
   historyIndex = index;
   project = JSON.parse(history[index]);
   invalidatePreparedJob();
+  window.dispatchEvent(new Event("laserlink:design-changed"));
   processedCache.clear();
   $("materialSelect").value = project.material || "Unspecified";
   $("materialNote").value = project.materialNote || "";
@@ -6041,10 +6064,15 @@ function drawScene(context, size, { grid = false, selection = false } = {}) {
   context.fillStyle = "#fff";
   context.fillRect(0, 0, size, size);
   if (grid) {
-    for (let mm = 0; mm <= BED; mm += 25) {
-      const p = mm * scale;
-      context.strokeStyle = mm % 100 === 0 ? "#9ca9a4" : "#d5ddda";
-      context.lineWidth = mm % 100 === 0 ? 1.5 : 0.8;
+    const displaySize = canvas.getBoundingClientRect().width || size;
+    const pixelRatio = size / displaySize;
+    context.save();
+    for (let mm = 0; mm <= BED; mm += 10) {
+      const major = mm % 100 === 0;
+      const middle = mm % 50 === 0;
+      context.strokeStyle = major ? "#9ca9a4" : middle ? "#c9d3ce" : "#e7ece9";
+      context.lineWidth = (major ? 1.1 : middle ? 0.8 : 0.5) * pixelRatio;
+      const p = mm === 0 ? context.lineWidth / 2 : mm === BED ? size - context.lineWidth / 2 : mm * scale;
       context.beginPath();
       context.moveTo(p, 0);
       context.lineTo(p, size);
@@ -6053,13 +6081,8 @@ function drawScene(context, size, { grid = false, selection = false } = {}) {
       context.moveTo(0, p);
       context.lineTo(size, p);
       context.stroke();
-      if (mm % 100 === 0) {
-        context.font = `bold ${Math.max(10, Math.round(size / 75))}px system-ui`;
-        context.fillStyle = "#53645e";
-        context.fillText(String(mm), p + 3, 16);
-        context.fillText(String(BED - mm), 4, p - 4);
-      }
     }
+    context.restore();
   }
   const capturedOutline = grid ? activeAlignment.outline : null;
   if (capturedOutline?.closed && capturedOutline.points.length >= 3) {
@@ -6244,6 +6267,37 @@ function render() {
     drawScene(ctx, canvas.width, { grid: true, selection: true });
   });
 }
+function updateRulers(displayWidth) {
+  const step = displayWidth >= 580 ? 10 : displayWidth >= 360 ? 20 : 50;
+  const hideNextToEnd = step * displayWidth / BED < 36;
+  if (rulerStep === `${step}:${hideNextToEnd}`) return;
+  rulerStep = `${step}:${hideNextToEnd}`;
+  const xLabels = [], yLabels = [];
+  for (let mm = 0; mm <= BED; mm += step) {
+    if (!(hideNextToEnd && mm === BED - step)) {
+      const xLabel = document.createElement("span");
+      xLabel.className = `ruler-label${mm % 100 === 0 ? " major" : ""}`;
+      xLabel.textContent = String(mm);
+      xLabel.style.left = `${mm / BED * 100}%`;
+      xLabels.push(xLabel);
+    }
+    const yLabel = document.createElement("span");
+    yLabel.className = `ruler-label${mm % 100 === 0 ? " major" : ""}`;
+    yLabel.textContent = String(mm);
+    yLabel.style.top = `${(BED - mm) / BED * 100}%`;
+    yLabels.push(yLabel);
+  }
+  rulerX.replaceChildren(...xLabels);
+  rulerY.replaceChildren(...yLabels);
+}
+function fitCanvasResolution() {
+  const displayWidth = canvas.getBoundingClientRect().width;
+  if (!displayWidth) return;
+  updateRulers(displayWidth);
+  const target = Math.max(900, Math.min(2e3, Math.round(displayWidth * (window.devicePixelRatio || 1))));
+  if (canvas.width !== target) canvas.width = canvas.height = target;
+  render();
+}
 function cacheImage(object) {
   const image = new Image();
   const promise = new Promise((resolve, reject) => {
@@ -6369,29 +6423,24 @@ function addObject(object) {
 function objectBounds() {
   if (!project.objects.length) return null;
   return project.objects.reduce((result, object) => {
-    const angle = (object.rotation || 0) * Math.PI / 180;
-    const c = Math.cos(angle), s = Math.sin(angle);
-    const centerX = object.x + object.w / 2, centerY = object.y + object.h / 2;
     const margin = object.type === "path" ? (object.stroke || 1) / 2 : 0;
-    for (const dx of [-object.w / 2 - margin, object.w / 2 + margin]) {
-      for (const dy of [-object.h / 2 - margin, object.h / 2 + margin]) {
-        const x = centerX + dx * c - dy * s;
-        const y = centerY + dx * s + dy * c;
-        result.minX = Math.min(result.minX, x);
-        result.maxX = Math.max(result.maxX, x);
-        result.minY = Math.min(result.minY, y);
-        result.maxY = Math.max(result.maxY, y);
-      }
-    }
+    const bounds = rotatedBounds(object, margin);
+    result.minX = Math.min(result.minX, bounds.minX);
+    result.maxX = Math.max(result.maxX, bounds.maxX);
+    result.minY = Math.min(result.minY, bounds.minY);
+    result.maxY = Math.max(result.maxY, bounds.maxY);
     return result;
   }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
 }
 function syncSelection() {
   const object = selected();
-  $("selectedSummary").textContent = object ? `${object.kind || "Artwork"} \xB7 ${object.w.toFixed(1)} \xD7 ${object.h.toFixed(1)} mm` : "Select an object on the grid to position it.";
+  const margin = object?.type === "path" ? (object.stroke || 1) / 2 : 0;
+  const bounds = object ? rotatedBounds(object, margin) : null;
+  $("selectedSummary").textContent = object ? `${object.kind || "Artwork"} \xB7 ${object.w.toFixed(1)} \xD7 ${object.h.toFixed(1)} mm artwork` + (object.rotation ? ` \xB7 occupies ${bounds.width.toFixed(1)} \xD7 ${bounds.height.toFixed(1)} mm` : "") : "Select an object on the grid to position it.";
   for (const [id, key] of [["objectX", "x"], ["objectY", "y"], ["objectW", "w"], ["objectH", "h"], ["objectRotation", "rotation"]]) {
     $(id).disabled = !object;
-    $(id).value = object ? Number(object[key] || 0).toFixed(key === "rotation" ? 0 : 1) : "";
+    const value = key === "x" ? bounds?.minX : key === "y" ? bounds?.minY : object?.[key];
+    $(id).value = object ? (Math.abs(value || 0) < 0.05 ? 0 : value).toFixed(key === "rotation" ? 0 : 1) : "";
   }
   for (const id of ["flipHorizontal", "flipVertical", "deleteObject"]) $(id).disabled = !object;
   if (object?.type === "image") {
@@ -6673,8 +6722,18 @@ canvas.addEventListener("pointermove", (event) => {
   } else {
     const object = selected();
     if (!object) return;
-    object.x = clamp(pointerAction.x + point.x - pointerAction.start.x, 0, BED - object.w);
-    object.y = clamp(pointerAction.y + point.y - pointerAction.start.y, 0, BED - object.h);
+    const original = { ...object, x: pointerAction.x, y: pointerAction.y };
+    const margin = object.type === "path" ? (object.stroke || 1) / 2 : 0;
+    const bounds = rotatedBounds(original, margin);
+    const position = moveRotatedBounds(
+      original,
+      bounds.minX + point.x - pointerAction.start.x,
+      bounds.minY + point.y - pointerAction.start.y,
+      BED,
+      margin
+    );
+    object.x = position.x;
+    object.y = position.y;
     pointerAction.changed ||= Math.abs(object.x - pointerAction.x) > 1e-3 || Math.abs(object.y - pointerAction.y) > 1e-3;
     syncSelection();
     render();
@@ -6819,11 +6878,29 @@ for (const [id, key] of [["objectX", "x"], ["objectY", "y"], ["objectW", "w"], [
     syncSelection();
     return;
   }
-  object[key] = key === "rotation" ? clamp(value, -180, 180) : clamp(value, key === "w" || key === "h" ? 0.2 : 0, BED);
-  object.w = Math.min(object.w, BED);
-  object.h = Math.min(object.h, BED);
-  object.x = clamp(object.x, 0, BED - object.w);
-  object.y = clamp(object.y, 0, BED - object.h);
+  const before = { ...object };
+  const margin = object.type === "path" ? (object.stroke || 1) / 2 : 0;
+  try {
+    if (key === "x" || key === "y") {
+      const bounds = rotatedBounds(object, margin);
+      Object.assign(object, moveRotatedBounds(
+        object,
+        key === "x" ? value : bounds.minX,
+        key === "y" ? value : bounds.minY,
+        BED,
+        margin
+      ));
+    } else {
+      object[key] = key === "rotation" ? clamp(value, -180, 180) : clamp(value, 0.2, BED);
+      const bounds = rotatedBounds(object, margin);
+      Object.assign(object, moveRotatedBounds(object, bounds.minX, bounds.minY, BED, margin));
+    }
+  } catch (error) {
+    Object.assign(object, before);
+    hint(error.message);
+    syncSelection();
+    return;
+  }
   syncSelection();
   commit();
   render();
@@ -6866,7 +6943,10 @@ function safeName(value, fallback) {
   return String(value || fallback).replace(/[^a-z0-9._-]+/gi, "-").slice(0, 80) || fallback;
 }
 function validProjectObject(object) {
-  if (!object || typeof object !== "object" || !["image", "path"].includes(object.type) || typeof object.id !== "string" || object.id.length > 100 || ![object.x, object.y, object.w, object.h, object.rotation || 0].every(Number.isFinite) || object.x < 0 || object.y < 0 || object.w <= 0 || object.h <= 0 || object.x + object.w > BED || object.y + object.h > BED || Math.abs(object.rotation || 0) > 180) return false;
+  if (!object || typeof object !== "object" || !["image", "path"].includes(object.type) || typeof object.id !== "string" || object.id.length > 100 || ![object.x, object.y, object.w, object.h, object.rotation || 0].every(Number.isFinite) || object.w <= 0 || object.h <= 0 || Math.abs(object.rotation || 0) > 180) return false;
+  const margin = object.type === "path" ? (object.stroke || 1) / 2 : 0;
+  const bounds = rotatedBounds(object, margin);
+  if (bounds.minX < -1e-3 || bounds.minY < -1e-3 || bounds.maxX > BED + 1e-3 || bounds.maxY > BED + 1e-3) return false;
   if (object.type === "image") {
     return typeof object.dataUrl === "string" && /^data:image\/(png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(object.dataUrl) && (!object.contours || Array.isArray(object.contours) && object.contours.length <= 1e3 && object.contours.reduce((count, path) => count + (Array.isArray(path) ? path.length : 12001), 0) <= 12e3 && object.contours.every((path) => Array.isArray(path) && path.length >= 2 && path.every((point) => Array.isArray(point) && point.length === 2 && point.every(Number.isFinite)))) && (!object.crop || Array.isArray(object.crop) && object.crop.length === 4 && object.crop.every((value) => Number.isFinite(value) && value >= 0 && value <= 80) && object.crop[0] + object.crop[2] < 95 && object.crop[1] + object.crop[3] < 95);
   }
@@ -7202,6 +7282,8 @@ $("prepareJob").addEventListener("click", async () => {
 project = freshProject();
 commit();
 syncSelection();
-render();
+fitCanvasResolution();
 renderProjects();
+window.addEventListener("resize", fitCanvasResolution);
+new ResizeObserver(fitCanvasResolution).observe(canvas);
 window.dispatchEvent(new Event("laserlink:editor-ready"));

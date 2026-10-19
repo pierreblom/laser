@@ -28,6 +28,25 @@ export function buildBoxFrame({ bounds, origin, wco, limits, pocket, sValue, sMa
     `G1 X${fmt(b.minX)} Y${fmt(b.minY)}`, 'M5'];
 }
 
+export function buildLocateBox({ bounds, origin, wco, limits, pocket, feed, maxFeed }) {
+  if (!Number.isFinite(maxFeed) || maxFeed < 100 || !Number.isFinite(feed) ||
+      feed < 100 || feed > Math.min(4000, maxFeed)) {
+    throw new Error(`Locate speed must be 100–${Math.min(4000, maxFeed)} mm/min for this controller.`);
+  }
+  const b = translateBounds(bounds, origin);
+  if (b.minX >= b.maxX || b.minY >= b.maxY) throw new Error('Locate bounds must have positive width and height.');
+  assertMachineBounds(b, wco, limits, pocket);
+  const travelMm = 2 * ((b.maxX - b.minX) + (b.maxY - b.minY));
+  if (travelMm / feed > 3) throw new Error('This locate path would take over three minutes.');
+  // Keep the engraving laser disabled during the approach and every edge.
+  return ['M5', 'S0', 'G21', 'G90', 'G54',
+    `G1 X${fmt(b.minX)} Y${fmt(b.minY)} F${fmt(feed)}`,
+    `G1 X${fmt(b.maxX)} Y${fmt(b.minY)}`,
+    `G1 X${fmt(b.maxX)} Y${fmt(b.maxY)}`,
+    `G1 X${fmt(b.minX)} Y${fmt(b.maxY)}`,
+    `G1 X${fmt(b.minX)} Y${fmt(b.minY)}`, 'M5', 'S0'];
+}
+
 export function buildContourFrame({ paths, origin, wco, limits, pocket, sValue, sMax, feed, maxFeed }) {
   frameSettings({ sValue, sMax, feed, maxFeed });
   if (!Array.isArray(paths) || !paths.length || paths.length > 1000) throw new Error('No usable vector contours.');

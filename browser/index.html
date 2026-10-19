@@ -6,10 +6,10 @@
   <meta name="theme-color" content="#121719">
   <title>Laser Link · Local Design & Bluetooth</title>
   <meta name="description" content="Create laser designs and send G-code to Laser-22504 from Chrome on this Mac over Bluetooth.">
-  <link rel="stylesheet" href="./style.css?v=0.7.5">
-  <link rel="stylesheet" href="./editor.css?v=0.6.0">
-  <script type="module" src="./app.mjs?v=0.9.0"></script>
-  <script type="module" src="./editor.bundle.js?v=0.10.0"></script>
+  <link rel="stylesheet" href="./style.css?v=0.7.7">
+  <link rel="stylesheet" href="./editor.css?v=0.6.4">
+  <script type="module" src="./app.mjs?v=0.9.1"></script>
+  <script type="module" src="./editor.bundle.js?v=0.10.6"></script>
 </head>
 <body>
   <main class="shell">
@@ -51,9 +51,21 @@
       <input id="pictureInput" type="file" accept=".svg,image/svg+xml,image/png,image/jpeg,image/webp,image/gif" hidden>
       <div class="creator-layout">
         <div class="board-column">
-          <div class="board-toolbar"><span>Machine bed</span><span>300 × 300 mm · origin at lower left</span></div>
-          <div class="board-shell"><canvas id="editorCanvas" width="900" height="900" aria-label="300 by 300 millimetre design workspace with center guides at X150 Y150"></canvas></div>
+          <div class="board-toolbar"><span>Machine bed</span><span>300 × 300 mm · 10 mm grid · origin at lower left</span></div>
+          <div class="bed-ruler-layout">
+            <div class="bed-ruler-corner" aria-hidden="true"></div>
+            <div id="bedRulerX" class="bed-ruler-x" aria-hidden="true"></div>
+            <div id="bedRulerY" class="bed-ruler-y" aria-hidden="true"></div>
+            <div class="board-shell"><canvas id="editorCanvas" width="900" height="900" aria-label="300 by 300 millimetre design workspace. X runs from 0 at left to 300 at right; Y runs from 0 at bottom to 300 at top."></canvas></div>
+          </div>
           <p class="tiny">Purple = captured item outline · orange = measured box · blue = jig pocket. Guides are not engraved.</p>
+          <section class="locate-panel" aria-labelledby="locateTitle">
+            <h3 id="locateTitle">Locate test · laser off</h3>
+            <p>The head traces the artwork's rectangular bounds at S0. Watch the head: there is no laser dot or mark at zero power.</p>
+            <label class="jog-ack"><input id="locateArmed" type="checkbox"> The machine path is clear, and I can reach its physical stop.</label>
+            <div class="locate-actions"><button id="locateTest" class="button button-secondary" type="button" disabled>Trace image position</button><button id="stopLocate" class="button button-danger" type="button" disabled>Stop test</button></div>
+            <p id="locateStatus" class="control-hint" role="status" aria-live="polite">Connect and Home the laser in Control, then add artwork.</p>
+          </section>
           <div id="editorHint" class="editor-hint" role="status" aria-live="polite">Choose Picture, Text, Draw, or Code to add an object.</div>
         </div>
         <aside class="editor-sidebar">
@@ -113,8 +125,8 @@
           </div>
           <div class="selection-panel">
             <h3>Selected object</h3><p id="selectedSummary">Select an object on the grid to position it.</p>
-            <p>Drag the green corner handles to resize proportionally, or drag inside the image to move it.</p>
-            <div class="four-fields"><label>X (mm)<input id="objectX" type="number" min="0" max="300" step="0.1"></label><label>Y (mm)<input id="objectY" type="number" min="0" max="300" step="0.1"></label><label>W (mm)<input id="objectW" type="number" min="0.2" max="300" step="0.1"></label><label>H (mm)<input id="objectH" type="number" min="0.2" max="300" step="0.1"></label></div>
+            <p>Drag the green corner handles to resize, or drag inside the image to move it. X and Y are the visible outline’s lower-left corner; artwork W and H are measured before rotation.</p>
+            <div class="four-fields"><label>Left X (mm)<input id="objectX" type="number" min="0" max="300" step="0.1"></label><label>Bottom Y (mm)<input id="objectY" type="number" min="0" max="300" step="0.1"></label><label>Artwork W (mm)<input id="objectW" type="number" min="0.2" max="300" step="0.1"></label><label>Artwork H (mm)<input id="objectH" type="number" min="0.2" max="300" step="0.1"></label></div>
             <label class="control-label" for="objectRotation">Rotation (°)</label><input id="objectRotation" type="number" min="-180" max="180" step="1">
             <div class="selection-actions"><button id="flipHorizontal" type="button">Flip H</button><button id="flipVertical" type="button">Flip V</button><button id="deleteObject" type="button">Delete</button></div>
           <button id="fitMeasured" class="measure-fit" type="button" disabled>Fit selection inside measured area</button>

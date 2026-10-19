@@ -1,7 +1,7 @@
 import qrcode from 'qrcode-generator';
 import JsBarcode from 'jsbarcode';
 import { rasterToGcode } from './gcode.mjs';
-import { hitResizeCorner, pointInRotatedRect, resizeFromCorner } from './geometry.mjs';
+import { hitResizeCorner, moveRotatedBounds, pointInRotatedRect, resizeFromCorner, rotatedBounds } from './geometry.mjs';
 import { listLocalProjects, removeLocalProjects, saveLocalProject } from './project-store.mjs';
 import { assertMachineBounds, collectContourPaths } from './alignment.mjs';
 import { traceBinaryContours } from './contour-trace.mjs';
@@ -10,6 +10,8 @@ import { extractSvgContours } from './svg-contours.mjs';
 const $ = (id) => document.getElementById(id);
 const BED = 300;
 const canvas = $('editorCanvas');
+const rulerX = $('bedRulerX');
+const rulerY = $('bedRulerY');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const imageCache = new Map();
 const processedCache = new Map();
@@ -21,6 +23,7 @@ let pointerAction = null;
 let framePreview = false;
 let machineSettings = null;
 let renderQueued = false;
+let rulerStep = 0;
 let autosaveTimer = null;
 let saveQueue = Promise.resolve();
 let selectingProjects = false;
@@ -47,6 +50,7 @@ function invalidatePreparedJob(parameters = project.parameters) {
 }
 function commit() {
   invalidatePreparedJob();
+  window.dispatchEvent(new Event('laserlink:design-changed'));
   history = history.slice(0, historyIndex + 1);
   history.push(snapshot());
   if (history.length > 30) history.shift();
@@ -60,6 +64,7 @@ function restore(index) {
   historyIndex = index;
   project = JSON.parse(history[index]);
   invalidatePreparedJob();
+  window.dispatchEvent(new Event('laserlink:design-changed'));
   processedCache.clear();
   $('materialSelect').value = project.material || 'Unspecified';
   $('materialNote').value = project.materialNote || '';
@@ -168,19 +173,19 @@ function drawScene(context, size, { grid = false, selection = false } = {}) {
   context.clearRect(0, 0, size, size);
   context.fillStyle = '#fff'; context.fillRect(0, 0, size, size);
   if (grid) {
-    for (let mm = 0; mm <= BED; mm += 25) {
-      const p = mm * scale;
-      context.strokeStyle = mm % 100 === 0 ? '#9ca9a4' : '#d5ddda';
-      context.lineWidth = mm % 100 === 0 ? 1.5 : 0.8;
+    const displaySize = canvas.getBoundingClientRect().width || size;
+    const pixelRatio = size / displaySize;
+    context.save();
+    for (let mm = 0; mm <= BED; mm += 10) {
+      const major = mm % 100 === 0;
+      const middle = mm % 50 === 0;
+      context.strokeStyle = major ? '#9ca9a4' : middle ? '#c9d3ce' : '#e7ece9';
+      context.lineWidth = (major ? 1.1 : middle ? 0.8 : 0.5) * pixelRatio;
+      const p = mm === 0 ? context.lineWidth / 2 : mm === BED ? size - context.lineWidth / 2 : mm * scale;
       context.beginPath(); context.moveTo(p, 0); context.lineTo(p, size); context.stroke();
       context.beginPath(); context.moveTo(0, p); context.lineTo(size, p); context.stroke();
-      if (mm % 100 === 0) {
-        context.font = `bold ${Math.max(10, Math.round(size / 75))}px system-ui`;
-        context.fillStyle = '#53645e';
-        context.fillText(String(mm), p + 3, 16);
-        context.fillText(String(BED - mm), 4, p - 4);
-      }
     }
+    context.restore();
   }
   const capturedOutline = grid ? activeAlignment.outline : null;
   if (capturedOutline?.closed && capturedOutline.points.length >= 3) {
@@ -319,6 +324,39 @@ function render() {
   requestAnimationFrame(() => { renderQueued = false; drawScene(ctx, canvas.width, { grid: true, selection: true }); });
 }
 
+function updateRulers(displayWidth) {
+  const step = displayWidth >= 580 ? 10 : displayWidth >= 360 ? 20 : 50;
+  const hideNextToEnd = step * displayWidth / BED < 36;
+  if (rulerStep === `${step}:${hideNextToEnd}`) return;
+  rulerStep = `${step}:${hideNextToEnd}`;
+  const xLabels = [], yLabels = [];
+  for (let mm = 0; mm <= BED; mm += step) {
+    if (!(hideNextToEnd && mm === BED - step)) {
+      const xLabel = document.createElement('span');
+      xLabel.className = `ruler-label${mm % 100 === 0 ? ' major' : ''}`;
+      xLabel.textContent = String(mm);
+      xLabel.style.left = `${mm / BED * 100}%`;
+      xLabels.push(xLabel);
+    }
+    const yLabel = document.createElement('span');
+    yLabel.className = `ruler-label${mm % 100 === 0 ? ' major' : ''}`;
+    yLabel.textContent = String(mm);
+    yLabel.style.top = `${(BED - mm) / BED * 100}%`;
+    yLabels.push(yLabel);
+  }
+  rulerX.replaceChildren(...xLabels);
+  rulerY.replaceChildren(...yLabels);
+}
+
+function fitCanvasResolution() {
+  const displayWidth = canvas.getBoundingClientRect().width;
+  if (!displayWidth) return;
+  updateRulers(displayWidth);
+  const target = Math.max(900, Math.min(2000, Math.round(displayWidth * (window.devicePixelRatio || 1))));
+  if (canvas.width !== target) canvas.width = canvas.height = target;
+  render();
+}
+
 function cacheImage(object) {
   const image = new Image();
   const promise = new Promise((resolve, reject) => {
@@ -416,28 +454,26 @@ function addObject(object) {
 function objectBounds() {
   if (!project.objects.length) return null;
   return project.objects.reduce((result, object) => {
-    const angle = (object.rotation || 0) * Math.PI / 180;
-    const c = Math.cos(angle), s = Math.sin(angle);
-    const centerX = object.x + object.w / 2, centerY = object.y + object.h / 2;
     const margin = object.type === 'path' ? (object.stroke || 1) / 2 : 0;
-    for (const dx of [-object.w / 2 - margin, object.w / 2 + margin]) {
-      for (const dy of [-object.h / 2 - margin, object.h / 2 + margin]) {
-        const x = centerX + dx * c - dy * s;
-        const y = centerY + dx * s + dy * c;
-        result.minX = Math.min(result.minX, x); result.maxX = Math.max(result.maxX, x);
-        result.minY = Math.min(result.minY, y); result.maxY = Math.max(result.maxY, y);
-      }
-    }
+    const bounds = rotatedBounds(object, margin);
+    result.minX = Math.min(result.minX, bounds.minX); result.maxX = Math.max(result.maxX, bounds.maxX);
+    result.minY = Math.min(result.minY, bounds.minY); result.maxY = Math.max(result.maxY, bounds.maxY);
     return result;
   }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
 }
 
 function syncSelection() {
   const object = selected();
-  $('selectedSummary').textContent = object ? `${object.kind || 'Artwork'} · ${object.w.toFixed(1)} × ${object.h.toFixed(1)} mm` : 'Select an object on the grid to position it.';
+  const margin = object?.type === 'path' ? (object.stroke || 1) / 2 : 0;
+  const bounds = object ? rotatedBounds(object, margin) : null;
+  $('selectedSummary').textContent = object
+    ? `${object.kind || 'Artwork'} · ${object.w.toFixed(1)} × ${object.h.toFixed(1)} mm artwork` +
+      (object.rotation ? ` · occupies ${bounds.width.toFixed(1)} × ${bounds.height.toFixed(1)} mm` : '')
+    : 'Select an object on the grid to position it.';
   for (const [id, key] of [['objectX', 'x'], ['objectY', 'y'], ['objectW', 'w'], ['objectH', 'h'], ['objectRotation', 'rotation']]) {
     $(id).disabled = !object;
-    $(id).value = object ? Number(object[key] || 0).toFixed(key === 'rotation' ? 0 : 1) : '';
+    const value = key === 'x' ? bounds?.minX : key === 'y' ? bounds?.minY : object?.[key];
+    $(id).value = object ? (Math.abs(value || 0) < 0.05 ? 0 : value).toFixed(key === 'rotation' ? 0 : 1) : '';
   }
   for (const id of ['flipHorizontal', 'flipVertical', 'deleteObject']) $(id).disabled = !object;
   if (object?.type === 'image') {
@@ -656,8 +692,13 @@ canvas.addEventListener('pointermove', (event) => {
   } else {
     const object = selected();
     if (!object) return;
-    object.x = clamp(pointerAction.x + point.x - pointerAction.start.x, 0, BED - object.w);
-    object.y = clamp(pointerAction.y + point.y - pointerAction.start.y, 0, BED - object.h);
+    const original = { ...object, x: pointerAction.x, y: pointerAction.y };
+    const margin = object.type === 'path' ? (object.stroke || 1) / 2 : 0;
+    const bounds = rotatedBounds(original, margin);
+    const position = moveRotatedBounds(original,
+      bounds.minX + point.x - pointerAction.start.x,
+      bounds.minY + point.y - pointerAction.start.y, BED, margin);
+    object.x = position.x; object.y = position.y;
     pointerAction.changed ||= Math.abs(object.x - pointerAction.x) > 0.001 || Math.abs(object.y - pointerAction.y) > 0.001;
     syncSelection(); render();
   }
@@ -738,9 +779,19 @@ for (const [id, key] of [['objectX', 'x'], ['objectY', 'y'], ['objectW', 'w'], [
   const object = selected(); if (!object) return;
   const value = Number($(id).value);
   if (!Number.isFinite(value)) { syncSelection(); return; }
-  object[key] = key === 'rotation' ? clamp(value, -180, 180) : clamp(value, key === 'w' || key === 'h' ? 0.2 : 0, BED);
-  object.w = Math.min(object.w, BED); object.h = Math.min(object.h, BED);
-  object.x = clamp(object.x, 0, BED - object.w); object.y = clamp(object.y, 0, BED - object.h);
+  const before = { ...object };
+  const margin = object.type === 'path' ? (object.stroke || 1) / 2 : 0;
+  try {
+    if (key === 'x' || key === 'y') {
+      const bounds = rotatedBounds(object, margin);
+      Object.assign(object, moveRotatedBounds(object,
+        key === 'x' ? value : bounds.minX, key === 'y' ? value : bounds.minY, BED, margin));
+    } else {
+      object[key] = key === 'rotation' ? clamp(value, -180, 180) : clamp(value, 0.2, BED);
+      const bounds = rotatedBounds(object, margin);
+      Object.assign(object, moveRotatedBounds(object, bounds.minX, bounds.minY, BED, margin));
+    }
+  } catch (error) { Object.assign(object, before); hint(error.message); syncSelection(); return; }
   syncSelection(); commit(); render();
 });
 $('flipHorizontal').addEventListener('click', () => { const object = selected(); if (object) { object.flipX = !object.flipX; commit(); render(); } });
@@ -766,9 +817,12 @@ function validProjectObject(object) {
   if (!object || typeof object !== 'object' || !['image', 'path'].includes(object.type) ||
     typeof object.id !== 'string' || object.id.length > 100 ||
     ![object.x, object.y, object.w, object.h, object.rotation || 0].every(Number.isFinite) ||
-    object.x < 0 || object.y < 0 || object.w <= 0 || object.h <= 0 ||
-    object.x + object.w > BED || object.y + object.h > BED ||
+    object.w <= 0 || object.h <= 0 ||
     Math.abs(object.rotation || 0) > 180) return false;
+  const margin = object.type === 'path' ? (object.stroke || 1) / 2 : 0;
+  const bounds = rotatedBounds(object, margin);
+  if (bounds.minX < -0.001 || bounds.minY < -0.001 ||
+      bounds.maxX > BED + 0.001 || bounds.maxY > BED + 0.001) return false;
   if (object.type === 'image') {
     return typeof object.dataUrl === 'string' && /^data:image\/(png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(object.dataUrl) &&
       (!object.contours || (Array.isArray(object.contours) && object.contours.length <= 1000 &&
@@ -1043,5 +1097,7 @@ $('prepareJob').addEventListener('click', async () => {
 });
 
 project = freshProject();
-commit(); syncSelection(); render(); renderProjects();
+commit(); syncSelection(); fitCanvasResolution(); renderProjects();
+window.addEventListener('resize', fitCanvasResolution);
+new ResizeObserver(fitCanvasResolution).observe(canvas);
 window.dispatchEvent(new Event('laserlink:editor-ready'));

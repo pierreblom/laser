@@ -2,7 +2,7 @@ import { GrblTransport, parseGcode, TARGET_NAME, SERVICE_UUID, NOTIFY_UUID, WRIT
 import { buildCenterJogCommand, buildJogCommand, hasStartupCommands, parseGrblStatus, spindleOverrideCommands, workZeroCommands } from './control.mjs?v=0.5.4';
 import { describeSdStatus, listMountedCard, parseSdListing, uploadMountedJob } from './sd-card.mjs';
 import { assertMachineBounds, measuredBox, measurementToCanvas, outlineToCanvas, validateJig, validateOutlinePoint, workOriginForJig } from './alignment.mjs';
-import { buildBoxFrame, buildContourFrame } from './framing.mjs';
+import { buildBoxFrame, buildContourFrame, buildLocateBox } from './framing.mjs';
 
 const $ = (selector) => document.querySelector(selector);
 const connectButton = $('#connectButton');
@@ -82,6 +82,7 @@ let selectedSpeed = 300;
 let livePowerBusy = false;
 let spindleOverride = null;
 let framing = false;
+let locateRunning = false;
 let homedWco = null;
 let pointA = null, pointB = null, measurement = null;
 let outlinePoints = [], outlineClosed = false;
@@ -317,6 +318,10 @@ function updateControls() {
   $('#frameMeasurement').disabled = !canFrame || !measurement;
   $('#frameContour').disabled = !canFrame;
   $('#stopFrame').disabled = !framing;
+  const canLocate = homedIdle && machineSettings?.maxRateX >= 100 && machineSettings?.maxRateY >= 100 &&
+    machineLimits()?.x > 0 && machineLimits()?.y > 0 && Boolean(currentWco()) && $('#locateArmed').checked;
+  $('#locateTest').disabled = !canLocate;
+  $('#stopLocate').disabled = !locateRunning;
 }
 
 function onControllerLine(line) {
@@ -350,6 +355,7 @@ function updatePosition(line) {
     clearCapturedGeometry();
     $('#jogArmed').checked = false;
     $('#frameArmed').checked = false;
+    $('#locateArmed').checked = false;
     publishAlignment();
   }
   if (originMethod === 'homed' && homedWco && parsed.wco &&
@@ -357,7 +363,7 @@ function updatePosition(line) {
        Math.abs(parsed.wco.y * (machineSettings?.reportInches === 1 ? 25.4 : 1) - homedWco.y) > 0.1)) {
     originEstablished = false; originMethod = null;
     clearCapturedGeometry();
-    $('#jogArmed').checked = false; $('#frameArmed').checked = false;
+    $('#jogArmed').checked = false; $('#frameArmed').checked = false; $('#locateArmed').checked = false;
     publishAlignment();
     controlHint('Work offset changed since homing. Home again before jig alignment or framing.', true);
   }
@@ -410,12 +416,12 @@ async function executeMovement(makeCommand, description) {
     await transport.sendCommand(command);
     controlHint(`${description} at ${selectedSpeed} mm/min…`);
     let idleReadings = 0;
-    for (let attempt = 0; attempt < 120; attempt++) {
+    for (let attempt = 0; attempt < 1200; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 250));
       const status = await transport.queryStatus();
       idleReadings = status.startsWith('<Idle') ? idleReadings + 1 : 0;
       if (idleReadings >= 2) break;
-      if (attempt === 119) throw new Error('Movement did not return to idle in 30 seconds. Check the machine.');
+      if (attempt === 1199) throw new Error('Movement did not return to idle in five minutes. Check the machine.');
     }
     controlHint('Movement complete. Position updated.');
   } catch (error) { controlHint(`Movement stopped: ${error.message}`, true); }
@@ -443,6 +449,7 @@ async function homeMachine() {
   clearCapturedGeometry();
   $('#jogArmed').checked = false;
   $('#frameArmed').checked = false;
+  $('#locateArmed').checked = false;
   publishAlignment();
   updateControls();
   try {
@@ -553,6 +560,7 @@ function onDisconnected() {
   $('#atWorkOrigin').checked = false;
   $('#homeArmed').checked = false;
   $('#frameArmed').checked = false;
+  $('#locateArmed').checked = false;
   $('#xPosition').textContent = '—'; $('#yPosition').textContent = '—';
   $('#positionKind').textContent = 'Connect Laser-22504 to read its GRBL position.';
   controlHint('Disconnected. Connect the laser to enable movement.');
@@ -947,6 +955,7 @@ async function runJob() {
     $('#jogArmed').checked = false;
     $('#homeArmed').checked = false;
     $('#frameArmed').checked = false;
+    $('#locateArmed').checked = false;
     publishAlignment();
     const limitAlarm = /ALARM:1\b/i.test(error.message);
     if (limitAlarm) {
@@ -1055,10 +1064,12 @@ async function abortJob() {
   if (!running || !transport) return false;
   const currentTransport = transport;
   const wasFraming = framing;
+  const wasLocating = locateRunning;
   controlBusy = true;
   runId++;
   running = false;
   framing = false;
+  locateRunning = false;
   paused = false;
   holdConfirmed = false;
   pauseBusy = false;
@@ -1071,6 +1082,8 @@ async function abortJob() {
   $('#homeArmed').checked = false;
   $('#atWorkOrigin').checked = false;
   $('#frameArmed').checked = false;
+  $('#locateArmed').checked = false;
+  if (wasLocating) $('#locateStatus').textContent = 'Locate test stopped. Check the head, then Home before retrying.';
   clearCapturedGeometry();
   publishAlignment();
   pauseResolver?.();
@@ -1087,7 +1100,9 @@ async function abortJob() {
       catch (error) { addLog(`Could not confirm M5 after reset: ${error.message}`); }
     }
     verified = true;
-    setStatus(wasFraming
+    setStatus(wasLocating
+      ? 'Locate test stopped by controller reset. Check the head, then Home before another test.'
+      : wasFraming
       ? 'Framing stopped by controller reset. Check the head, then Home before another frame.'
       : 'Job aborted. Home with switches, change power, and prepare the job again before restarting.', 'error');
     return true;
@@ -1135,6 +1150,7 @@ function saveJig() {
     localStorage.setItem(JIGS_KEY, JSON.stringify(jigProfiles));
     localStorage.setItem(ACTIVE_JIG_KEY, profile.id);
     activeJigId = profile.id;
+    $('#locateArmed').checked = false;
     clearCapturedGeometry();
     renderJigProfiles();
     $('#jigStatus').textContent = `Saved ${profile.jig_name}. Home before physical framing.`;
@@ -1203,47 +1219,54 @@ function requestEditorGeometry(kind) {
 }
 
 async function executeFrame(kind) {
+  const isLocate = kind === 'locate';
+  const statusElement = $(isLocate ? '#locateStatus' : '#frameStatus');
   if (!verified || !originEstablished || originMethod !== 'homed' || running || controlBusy ||
-      positionState?.state !== 'Idle' || !$('#frameArmed').checked || !transport) return;
+      positionState?.state !== 'Idle' || !(isLocate ? $('#locateArmed') : $('#frameArmed')).checked || !transport) return;
   controlBusy = true; updateControls();
   let geometry;
   try {
     geometry = kind === 'measurement' ? { bounds: measurementLocalBounds() } :
       await requestEditorGeometry(kind === 'contour' ? 'contour' : 'box');
     if (!geometry?.bounds) throw new Error('Create a design or capture a measurement first.');
-    const sValue = Number($('#frameSValue').value), feed = Number($('#frameFeed').value);
     const maxFeed = Math.min(machineSettings?.maxRateX || 0, machineSettings?.maxRateY || 0);
+    const sValue = Number($('#frameSValue').value);
+    const feed = isLocate ? Math.min(1500, maxFeed) : Number($('#frameFeed').value);
     // Build once before touching the controller so bad geometry or settings
     // fail while the laser is still untouched.
     const options = { origin: workOriginForJig(activeJig(), currentWco()), wco: currentWco(),
       limits: machineLimits(), pocket: activeJig(), sValue, sMax: machineSettings?.sMax, feed, maxFeed };
-    if (kind === 'contour') buildContourFrame({ paths: geometry.paths, ...options });
+    if (isLocate) buildLocateBox({ bounds: geometry.bounds, ...options });
+    else if (kind === 'contour') buildContourFrame({ paths: geometry.paths, ...options });
     else buildBoxFrame({ bounds: geometry.bounds, ...options });
-    if (!window.confirm(`Physically trace the ${kind} at S${sValue}, F${feed} mm/min? Low power can still mark material. Watch the machine and keep its stop accessible.`)) return;
+    if (!isLocate && !window.confirm(`Physically trace the ${kind} at S${sValue}, F${feed} mm/min? Low power can still mark material. Watch the machine and keep its stop accessible.`)) return;
     const thisRun = ++runId;
-    running = true; framing = true; controlBusy = false;
-    $('#frameArmed').checked = false;
-    $('#frameStatus').textContent = 'Checking controller coordinates before framing…';
+    running = true; framing = true; locateRunning = isLocate; controlBusy = false;
+    (isLocate ? $('#locateArmed') : $('#frameArmed')).checked = false;
+    statusElement.textContent = isLocate ? 'Checking controller coordinates before the laser-off test…' : 'Checking controller coordinates before framing…';
     updateControls();
     try {
       let status = await transport.queryStatus();
       if (!status.startsWith('<Idle')) throw new Error(`Controller is not idle: ${status}`);
       await transport.sendCommand('M5');
+      if (isLocate) await transport.sendCommand('S0');
       await transport.sendCommand('G54');
       await transport.sendCommand('G92.1');
       lastWco = null; positionState = null;
       for (let attempt = 0; attempt < 12 && !currentWco(); attempt++) await transport.queryStatus();
       if (!originEstablished || !positionState?.work || !currentWco()) throw new Error('Work offset could not be verified after selecting G54.');
       const fresh = { ...options, origin: workOriginForJig(activeJig(), currentWco()), wco: currentWco() };
-      const lines = kind === 'contour'
-        ? buildContourFrame({ paths: geometry.paths, ...fresh })
-        : buildBoxFrame({ bounds: geometry.bounds, ...fresh });
-      $('#frameStatus').textContent = `Tracing ${kind}: ${lines.length} commands. Watch the machine.`;
+      const lines = isLocate ? buildLocateBox({ bounds: geometry.bounds, ...fresh })
+        : kind === 'contour' ? buildContourFrame({ paths: geometry.paths, ...fresh })
+          : buildBoxFrame({ bounds: geometry.bounds, ...fresh });
+      statusElement.textContent = isLocate
+        ? `Tracing the design box with the laser off at F${feed} mm/min. Watch the head.`
+        : `Tracing ${kind}: ${lines.length} commands. Watch the machine.`;
       for (const line of lines) {
         if (thisRun !== runId) return;
         await transport.sendCommand(line);
       }
-      // M5 is the final queued command. Idle confirms it has executed.
+      // Idle confirms the queued laser-off path has finished executing.
       let idle = false;
       for (let attempt = 0; attempt < 600 && thisRun === runId; attempt++) {
         status = await transport.queryStatus();
@@ -1252,18 +1275,21 @@ async function executeFrame(kind) {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       if (thisRun !== runId) return;
-      if (!idle) throw new Error('Framing did not return to Idle in five minutes.');
+      if (!idle) throw new Error('Motion did not return to Idle in five minutes.');
       await transport.sendCommand('M5');
-      running = false; framing = false;
-      $('#frameStatus').textContent = `${kind} frame complete. Controller reports Idle and M5 was acknowledged.`;
+      if (isLocate) await transport.sendCommand('S0');
+      running = false; framing = false; locateRunning = false;
+      statusElement.textContent = isLocate
+        ? 'Locate test complete. Controller is Idle; M5 and S0 were acknowledged.'
+        : `${kind} frame complete. Controller reports Idle and M5 was acknowledged.`;
     } catch (error) {
       if (thisRun !== runId) return;
       await abortJob();
-      $('#frameStatus').textContent = `Framing stopped: ${error.message}. Check the machine and Home before retrying.`;
+      statusElement.textContent = `${isLocate ? 'Locate test' : 'Framing'} stopped: ${error.message}. Check the machine and Home before retrying.`;
     } finally {
-      if (thisRun === runId) { running = false; framing = false; updateControls(); }
+      if (thisRun === runId) { running = false; framing = false; locateRunning = false; updateControls(); }
     }
-  } catch (error) { $('#frameStatus').textContent = `Cannot frame: ${error.message}`; }
+  } catch (error) { statusElement.textContent = `${isLocate ? 'Cannot locate' : 'Cannot frame'}: ${error.message}`; }
   finally { if (!running) { controlBusy = false; updateControls(); } }
 }
 
@@ -1391,6 +1417,7 @@ window.addEventListener('beforeunload', (event) => {
 });
 $('#jigSelect').addEventListener('change', () => {
   activeJigId = $('#jigSelect').value;
+  $('#locateArmed').checked = false;
   try { localStorage.setItem(ACTIVE_JIG_KEY, activeJigId); } catch { /* Selection still works for this session. */ }
   clearCapturedGeometry();
   renderJigProfiles();
@@ -1401,6 +1428,7 @@ $('#deleteJig').addEventListener('click', () => {
   if (!jig || !window.confirm(`Delete jig profile ${jig.jig_name}?`)) return;
   jigProfiles = jigProfiles.filter((record) => record.id !== jig.id);
   activeJigId = '';
+  $('#locateArmed').checked = false;
   try {
     localStorage.setItem(JIGS_KEY, JSON.stringify(jigProfiles));
     localStorage.removeItem(ACTIVE_JIG_KEY);
@@ -1432,6 +1460,13 @@ $('#clearMeasurement').addEventListener('click', () => {
   publishAlignment(); updateControls();
 });
 $('#frameArmed').addEventListener('change', updateControls);
+$('#locateArmed').addEventListener('change', updateControls);
+window.addEventListener('laserlink:design-changed', () => {
+  $('#locateArmed').checked = false;
+  updateControls();
+});
+$('#locateTest').addEventListener('click', () => executeFrame('locate'));
+$('#stopLocate').addEventListener('click', () => abortJob());
 $('#frameDesign').addEventListener('click', () => executeFrame('design'));
 $('#frameMeasurement').addEventListener('click', () => executeFrame('measurement'));
 $('#frameContour').addEventListener('click', () => executeFrame('contour'));

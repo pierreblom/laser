@@ -24,6 +24,26 @@ export function rotatedCorner(object, corner) {
     y: centerY + sx * object.w / 2 * s + sy * object.h / 2 * c };
 }
 
+export function rotatedBounds(object, margin = 0) {
+  const angle = (object.rotation || 0) * Math.PI / 180;
+  const c = Math.abs(Math.cos(angle)), s = Math.abs(Math.sin(angle));
+  const width = (object.w + 2 * margin) * c + (object.h + 2 * margin) * s;
+  const height = (object.w + 2 * margin) * s + (object.h + 2 * margin) * c;
+  const centerX = object.x + object.w / 2, centerY = object.y + object.h / 2;
+  return { minX: centerX - width / 2, minY: centerY - height / 2,
+    maxX: centerX + width / 2, maxY: centerY + height / 2, width, height };
+}
+
+export function moveRotatedBounds(object, x, y, bed = 300, margin = 0) {
+  const bounds = rotatedBounds(object, margin);
+  if (bounds.width > bed + 0.001 || bounds.height > bed + 0.001) {
+    throw new Error('The rotated artwork is larger than the machine bed. Reduce its size.');
+  }
+  const nextX = Math.max(0, Math.min(x, bed - bounds.width));
+  const nextY = Math.max(0, Math.min(y, bed - bounds.height));
+  return { x: object.x + nextX - bounds.minX, y: object.y + nextY - bounds.minY };
+}
+
 export function hitResizeCorner(point, object, radius) {
   if (!object || !Number.isFinite(radius) || radius <= 0) return null;
   return Object.keys(CORNER_SIGNS).find((corner) => {
@@ -55,14 +75,11 @@ export function resizeFromCorner(object, corner, pointer, bed = 300) {
     const centerY = anchor.y + (sx * w * s + sy * h * c) / 2;
     return { x: centerX - w / 2, y: centerY - h / 2, w, h };
   };
-  // Every corner moves on a ray from the fixed opposite corner. Bound both the
-  // rotated footprint and the stored (unrotated) rectangle to the machine bed.
+  // Every corner moves on a ray from the fixed opposite corner. The rotated
+  // footprint, rather than the stored rectangle, must fit on the bed.
   const atOne = geometryAt(1);
-  const candidates = [
-    ...Object.keys(CORNER_SIGNS).map((name) => rotatedCorner({ ...atOne, rotation: object.rotation }, name)),
-    { x: atOne.x, y: atOne.y }, { x: atOne.x + atOne.w, y: atOne.y },
-    { x: atOne.x, y: atOne.y + atOne.h }, { x: atOne.x + atOne.w, y: atOne.y + atOne.h },
-  ];
+  const candidates = Object.keys(CORNER_SIGNS).map((name) =>
+    rotatedCorner({ ...atOne, rotation: object.rotation }, name));
   let maxScale = Math.min(bed / object.w, bed / object.h);
   for (const candidate of candidates) {
     const vx = candidate.x - anchor.x, vy = candidate.y - anchor.y;

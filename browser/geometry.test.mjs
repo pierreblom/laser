@@ -1,6 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hitResizeCorner, pointInRotatedRect, resizeFromCorner, rotatedCorner } from './geometry.mjs';
+import { hitResizeCorner, moveRotatedBounds, pointInRotatedRect, resizeFromCorner, rotatedBounds, rotatedCorner } from './geometry.mjs';
+
+test('position fields follow the visible lower-left corner after rotation', () => {
+  const text = { x: 0, y: 94, w: 98.8, h: 15.8, rotation: 90 };
+  const bounds = rotatedBounds(text);
+  assert.ok(Math.abs(bounds.minX - 41.5) < 1e-9);
+  assert.ok(Math.abs(bounds.minY - 52.5) < 1e-9);
+  assert.ok(Math.abs(bounds.width - 15.8) < 1e-9);
+  assert.ok(Math.abs(bounds.height - 98.8) < 1e-9);
+  const moved = { ...text, ...moveRotatedBounds(text, 0, 25) };
+  assert.ok(moved.x < 0); // Stored pre-rotation origin may sit outside the visible footprint.
+  assert.ok(Math.abs(rotatedBounds(moved).minX) < 1e-9);
+  assert.ok(Math.abs(rotatedBounds(moved).minY - 25) < 1e-9);
+  const clamped = { ...moved, ...moveRotatedBounds(moved, 999, 999) };
+  assert.ok(Math.abs(rotatedBounds(clamped).maxX - 300) < 1e-9);
+  assert.ok(Math.abs(rotatedBounds(clamped).maxY - 300) < 1e-9);
+});
 
 test('hit testing follows a rotated image instead of its old horizontal box', () => {
   const image = { x: 60, y: 50, w: 180, h: 100, rotation: 90 };

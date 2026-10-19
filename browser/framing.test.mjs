@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildBoxFrame, buildContourFrame } from './framing.mjs';
+import { buildBoxFrame, buildContourFrame, buildLocateBox } from './framing.mjs';
 
 const options = { origin: { x: 20, y: 30 }, wco: { x: 0, y: 0 },
   limits: { x: 299, y: 299 }, pocket: { origin_x: 20, origin_y: 30, max_width: 80, max_height: 50 },
@@ -29,4 +29,14 @@ test('slow physical frames are rejected before streaming', () => {
   assert.throws(() => buildBoxFrame({ ...options, feed: 100,
     pocket: { origin_x: 20, origin_y: 30, max_width: 200, max_height: 200 },
     bounds: { minX: 0, minY: 0, maxX: 100, maxY: 100 } }), /three minutes/);
+});
+
+test('zero-power locate path stays inside the jig and never enables the laser', () => {
+  const lines = buildLocateBox({ ...options, bounds: { minX: 0, minY: 0, maxX: 40, maxY: 20 } });
+  assert.deepEqual(lines.slice(0, 6), ['M5', 'S0', 'G21', 'G90', 'G54', 'G1 X20 Y30 F3000']);
+  assert.equal(lines.at(-2), 'M5');
+  assert.equal(lines.at(-1), 'S0');
+  assert.ok(lines.every((line) => !/^M[34]\b/.test(line)));
+  assert.throws(() => buildLocateBox({ ...options,
+    bounds: { minX: 0, minY: 0, maxX: 100, maxY: 20 } }), /outside/);
 });
