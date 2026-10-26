@@ -1,3 +1,5 @@
+export { parseGcode } from './job-safety.mjs';
+
 export const TARGET_NAME = 'Laser-22504';
 export const SERVICE_UUID = 0xfff0;
 export const NOTIFY_UUID = 0xfff1;
@@ -5,20 +7,6 @@ export const WRITE_UUID = 0xfff2;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('ascii');
-
-export function parseGcode(text) {
-  const lines = [];
-  for (const [index, raw] of text.split(/\r\n|\n|\r/).entries()) {
-    const line = raw.trim();
-    if (!line || line.startsWith(';')) continue;
-    if (line.length > 254 || !/^[\x20-\x7e]+$/.test(line)) {
-      throw new Error(`Unsupported G-code on line ${index + 1}. Use printable ASCII, at most 254 characters per line.`);
-    }
-    lines.push(line);
-  }
-  if (!lines.length) throw new Error('This file has no G-code commands.');
-  return lines;
-}
 
 export class GrblTransport {
   constructor(writeWithResponse, writeRealtime, onLine = () => {}) {

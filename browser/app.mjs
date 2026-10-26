@@ -1,4 +1,5 @@
 import { GrblTransport, parseGcode, TARGET_NAME, SERVICE_UUID, NOTIFY_UUID, WRITE_UUID } from './protocol.mjs';
+import { analyzeImportedGcode, executeVerifiedMovement, importedJobReadiness, sendSafeJobPreamble, stopUncertainMotion } from './job-safety.mjs';
 import { buildCenterJogCommand, buildJogCommand, hasStartupCommands, parseGrblStatus, spindleOverrideCommands, workZeroCommands } from './control.mjs?v=0.5.4';
 import { describeSdStatus, listMountedCard, parseSdListing, uploadMountedJob } from './sd-card.mjs';
 import { assertMachineBounds, measuredBox, measurementToCanvas, outlineToCanvas, validateJig, validateOutlinePoint, workOriginForJig } from './alignment.mjs';
@@ -50,6 +51,9 @@ const modeControl = $('#modeControl');
 const modeProjects = $('#modeProjects');
 const controlView = $('#controlView');
 const projectsView = $('#projectsView');
+const appShell = $('#appShell');
+const safetyBar = $('#safetyBar');
+const safetyDetailsToggle = $('#safetyDetailsToggle');
 
 let device = null;
 let writeCharacteristic = null;
@@ -172,8 +176,74 @@ function showMode(mode) {
   ]) {
     view.hidden = mode !== name;
     button.setAttribute('aria-selected', String(mode === name));
+    button.tabIndex = mode === name ? 0 : -1;
   }
+  appShell.dataset.mode = mode;
   if (mode === 'control' && verified && !running && !controlBusy) refreshPosition();
+}
+
+function setUiState(selector, state, text) {
+  const element = $(selector);
+  element.dataset.state = state;
+  element.textContent = text;
+  element.closest('li')?.setAttribute('data-state', state);
+}
+
+function formatBounds(bounds) {
+  if (!bounds || ![bounds.minX, bounds.minY, bounds.maxX, bounds.maxY].every(Number.isFinite)) return '—';
+  return `${(bounds.maxX - bounds.minX).toFixed(1)} × ${(bounds.maxY - bounds.minY).toFixed(1)} mm`;
+}
+
+function updateSafetyUi() {
+  const connected = Boolean(device?.gatt?.connected);
+  const controllerIdle = connected && verified && positionState?.state === 'Idle';
+  const homed = connected && verified && originEstablished && originMethod === 'homed';
+  const settingsReady = machineSettings?.laserMode === 1 && machineSettings?.sMax > 0;
+  const jobReady = Boolean(job) && currentJobReady();
+  const ready = !startButton.disabled;
+
+  setUiState('#safetyConnection', connected && verified ? 'ready' : connected ? 'warning' : 'pending',
+    connected && verified ? 'Verified' : connected ? 'Check needed' : 'Disconnected');
+  setUiState('#safetyController', running ? paused ? 'warning' : 'active' : controllerIdle ? 'ready' : positionState?.state === 'Alarm' ? 'danger' : 'pending',
+    running ? paused ? 'Held' : 'Running' : positionState?.state || 'Unknown');
+  setUiState('#safetyOrigin', homed ? 'ready' : 'pending', homed ? 'Switch homed' : 'Required');
+  setUiState('#safetyJob', running ? 'active' : jobReady ? 'ready' : job ? 'warning' : 'pending',
+    running ? 'In progress' : jobReady ? 'Prepared' : job ? 'Checks pending' : 'Not prepared');
+  $('#safetySummary').textContent = running
+    ? paused ? 'Machine held — stay at the laser' : 'Laser job active — remain with the machine'
+    : ready ? 'All software preflight checks passed' : !connected ? 'Laser disconnected' : 'Complete the remaining checks before starting';
+  $('#safetyBar').dataset.state = running ? 'active' : ready ? 'ready' : positionState?.state === 'Alarm' ? 'danger' : 'pending';
+  $('#safetyAbortButton').hidden = !running;
+  $('#safetyAbortButton').disabled = !connected;
+
+  setUiState('#preflightConnection', connected && verified ? 'ready' : connected ? 'warning' : 'pending',
+    connected && verified ? 'Laser-22504 and GRBL verified' : connected ? 'Reconnect to verify GRBL' : 'Connect Laser-22504');
+  setUiState('#preflightController', controllerIdle ? 'ready' : running ? 'active' : positionState?.state === 'Alarm' ? 'danger' : 'pending',
+    controllerIdle ? 'Idle and ready for a new command' : running ? `Controller ${paused ? 'held' : 'running'}` : positionState?.state === 'Alarm' ? 'Alarm — inspect and home the machine' : 'Wait for an Idle controller report');
+  setUiState('#preflightOrigin', homed ? 'ready' : 'pending',
+    homed ? 'Limit switches verified; work origin established' : 'Home with limit switches in Control');
+  setUiState('#preflightSettings', settingsReady ? 'ready' : machineSettings ? 'danger' : 'pending',
+    settingsReady ? `$32=1 laser mode · $30=${machineSettings.sMax}` : machineSettings ? `Blocked: $32=${machineSettings.laserMode}; laser mode must be 1` : 'Read $30 and $32 from the controller');
+  setUiState('#preflightJob', jobReady ? 'ready' : job ? 'warning' : 'pending', jobReady
+    ? job.generated ? 'Generated path fits the verified work area' : 'Parser accepted; bounds are rechecked at the reported start position'
+    : job ? 'Job loaded; complete machine checks to verify its path' : 'Load or prepare a job');
+
+  const bounds = job?.generated ? job.bounds : job?.analysis?.bounds;
+  $('#summarySource').textContent = job ? job.generated ? 'Design workspace' : 'Imported G-code' : '—';
+  $('#summarySize').textContent = formatBounds(bounds);
+  $('#summaryPower').textContent = job
+    ? job.generated ? `${job.power ?? '—'}%${Number.isFinite(job.sValue) ? ` · S${job.sValue}` : ''}` : `max S${job.analysis?.maxS ?? '—'}`
+    : '—';
+  $('#summaryFeed').textContent = job
+    ? `${job.generated ? job.speed ?? '—' : job.analysis?.maxFeed ?? '—'} mm/min`
+    : '—';
+  $('#summaryCommands').textContent = job ? job.lines.length.toLocaleString() : '—';
+  $('#preflightBadge').dataset.state = ready ? 'ready' : running ? 'active' : 'pending';
+  $('#preflightBadge').textContent = ready ? 'Ready' : running ? 'Active' : 'Not ready';
+  $('#preflightSummary').textContent = ready
+    ? 'Software checks passed. Physically confirm material, ventilation, enclosure, and stop access before Start.'
+    : running ? 'Job is active. Watch the machine and keep the physical stop accessible.'
+      : 'Every item must pass before Start is enabled.';
 }
 
 function generatedJobReady() {
@@ -187,6 +257,18 @@ function generatedJobReady() {
     const expected = workOriginForJig(activeJig(), currentWco());
     return Math.abs(expected.x - job.origin.x) < 0.01 && Math.abs(expected.y - job.origin.y) < 0.01;
   } catch { return false; }
+}
+
+function importedJobGate() {
+  return importedJobReadiness({
+    connected: Boolean(device?.gatt?.connected), verified, originEstablished, originMethod,
+    positionState, machineSettings,
+  });
+}
+
+function currentJobReady() {
+  if (!job) return false;
+  return job.generated ? generatedJobReady() : importedJobGate().ready;
 }
 
 function workTravelX() {
@@ -221,7 +303,7 @@ function updateControls() {
   connectButton.textContent = connecting ? 'Connecting…' : connected ? 'Disconnect' : 'Connect laser';
   chooseButton.disabled = running || controlBusy;
   startButton.disabled = !connected || !verified || !originEstablished || positionState?.state !== 'Idle' ||
-    !job || running || controlBusy || sdBusy || sdUploadBusy || !generatedJobReady();
+    !job || running || controlBusy || sdBusy || sdUploadBusy || !currentJobReady();
   pauseButton.disabled = !connected || !running || framing || pauseBusy || livePowerBusy;
   abortButton.disabled = !connected || !running;
   const canReadSdBle = connected && verified && positionState?.state === 'Idle';
@@ -243,8 +325,9 @@ function updateControls() {
         : positionState?.state === 'Alarm' ? 'Controller is in Alarm after reset. Open Control and Home with switches before restarting.'
           : !originEstablished ? 'Home with switches in Control before restarting the job.'
             : !job ? 'Prepare the design again after changing power, then return here.'
+              : !job.generated && !importedJobGate().ready ? importedJobGate().reason
               : positionState?.state !== 'Idle' ? 'Wait for the controller to report Idle.'
-                : !generatedJobReady() ? 'Home with switches and rebuild the job if its jig, offset, settings, or travel changed.'
+                : !currentJobReady() ? 'Home with switches and rebuild the job if its jig, offset, settings, or travel changed.'
                   : 'Ready to send. Check the power setting and artwork before starting.';
   recoverButton.hidden = !connected || running || (verified && originEstablished);
   recoverButton.textContent = verified ? 'Open Control to Home' : 'Reconnect laser';
@@ -322,6 +405,7 @@ function updateControls() {
     machineLimits()?.x > 0 && machineLimits()?.y > 0 && Boolean(currentWco()) && $('#locateArmed').checked;
   $('#locateTest').disabled = !canLocate;
   $('#stopLocate').disabled = !locateRunning;
+  updateSafetyUi();
 }
 
 function onControllerLine(line) {
@@ -408,23 +492,27 @@ async function executeMovement(makeCommand, description) {
   }
   controlBusy = true; updateControls();
   try {
-    const before = await transport.queryStatus();
-    if (!before.startsWith('<Idle')) throw new Error(`Controller is not idle: ${before}`);
-    const command = makeCommand();
-    if (!command) { controlHint('The laser head is already at the work-area center.'); return; }
-    await transport.sendCommand('M5');
-    await transport.sendCommand(command);
-    controlHint(`${description} at ${selectedSpeed} mm/min…`);
-    let idleReadings = 0;
-    for (let attempt = 0; attempt < 1200; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      const status = await transport.queryStatus();
-      idleReadings = status.startsWith('<Idle') ? idleReadings + 1 : 0;
-      if (idleReadings >= 2) break;
-      if (attempt === 1199) throw new Error('Movement did not return to idle in five minutes. Check the machine.');
-    }
+    const result = await executeVerifiedMovement({ transport, makeCommand,
+      onStarted: () => controlHint(`${description} at ${selectedSpeed} mm/min…`) });
+    if (!result.moved) { controlHint('The laser head is already at the work-area center.'); return; }
     controlHint('Movement complete. Position updated.');
-  } catch (error) { controlHint(`Movement stopped: ${error.message}`, true); }
+  } catch (error) {
+    verified = false;
+    originEstablished = false;
+    originMethod = null;
+    homedWco = null;
+    positionState = null;
+    lastWco = null;
+    clearCapturedGeometry();
+    $('#jogArmed').checked = false;
+    $('#homeArmed').checked = false;
+    $('#atWorkOrigin').checked = false;
+    $('#frameArmed').checked = false;
+    $('#locateArmed').checked = false;
+    publishAlignment();
+    await stopUncertainMotion(transport);
+    controlHint(`Movement state is unverified: ${error.message} Jogging is locked; check the machine, reconnect, and Home before moving again.`, true);
+  }
   finally { controlBusy = false; updateControls(); }
 }
 
@@ -856,17 +944,20 @@ async function loadFile(file) {
   try {
     const text = await file.text();
     const lines = parseGcode(text);
-    job = { name: file.name, lines };
+    const analysis = analyzeImportedGcode(lines);
+    job = { name: file.name, lines, generated: false, analysis };
     sdUploadStatus.textContent = cardDirectory
       ? 'Ready to copy this job to the selected card.'
       : 'Select the laser card in a Mac card reader to copy this job.';
     sdFilename.value = file.name;
     jobName.textContent = file.name;
-    jobMeta.textContent = `${lines.length.toLocaleString()} G-code commands · ${(file.size / 1024).toFixed(1)} KB`;
+    const bounds = analysis.bounds;
+    const size = `${(bounds.maxX - bounds.minX).toFixed(1)} × ${(bounds.maxY - bounds.minY).toFixed(1)} mm`;
+    jobMeta.textContent = `${lines.length.toLocaleString()} commands · ${size} · max S${analysis.maxS} · ${(file.size / 1024).toFixed(1)} KB`;
     progress.max = lines.length;
     progress.value = 0;
     progressText.textContent = `0 / ${lines.length.toLocaleString()}`;
-    setStatus('Job loaded. Preview it in LightBurn before starting.', verified ? 'ready' : 'neutral');
+    setStatus('Job parsed and bounded. Home with switches, then review it before starting.', verified ? 'ready' : 'neutral');
     updateControls();
   } catch (error) {
     setStatus(error.message, 'error');
@@ -881,11 +972,25 @@ async function waitWhilePaused() {
 
 async function runJob() {
   if (!verified || !originEstablished || positionState?.state !== 'Idle' || !job || running || controlBusy || sdBusy || sdUploadBusy || !device?.gatt?.connected) return;
-  if (!generatedJobReady()) {
-    setStatus('Generated job settings do not match the connected controller. Rebuild it after reading $30 and $32.', 'error');
+  if (!currentJobReady()) {
+    setStatus(job?.generated
+      ? 'Generated job settings do not match the connected controller. Rebuild it after reading $30 and $32.'
+      : importedJobGate().reason, 'error');
     return;
   }
   const currentJob = job;
+  if (!currentJob.generated) {
+    try {
+      currentJob.analysis = analyzeImportedGcode(currentJob.lines, {
+        travelX: workTravelX(), travelY: workTravelY(), sMax: machineSettings.sMax,
+        maxFeed: Math.min(machineSettings.maxRateX, machineSettings.maxRateY),
+        startPosition: positionState.work,
+      });
+    } catch (error) {
+      setStatus(`Imported job blocked: ${error.message}`, 'error');
+      return;
+    }
+  }
   const accepted = window.confirm(`Send ${currentJob.name} to Laser-22504?\n\nThe laser can move and fire. Keep the area clear and watch the machine.`);
   if (!accepted) return;
   const thisRun = ++runId;
@@ -899,13 +1004,18 @@ async function runJob() {
   try {
     const initialStatus = await transport.queryStatus();
     if (!initialStatus.startsWith('<Idle')) throw new Error(`Controller is not idle: ${initialStatus}`);
+    await sendSafeJobPreamble(transport);
+    lastWco = null; positionState = null;
+    for (let attempt = 0; attempt < 12 && !currentWco(); attempt++) await transport.queryStatus();
     if (currentJob.generated) {
-      await transport.sendCommand('M5');
-      await transport.sendCommand('G54');
-      await transport.sendCommand('G92.1');
-      lastWco = null; positionState = null;
-      for (let attempt = 0; attempt < 12 && !currentWco(); attempt++) await transport.queryStatus();
       if (!generatedJobReady()) throw new Error('Jig offset or machine travel changed. Home and rebuild the job.');
+    } else {
+      if (!importedJobGate().ready) throw new Error(importedJobGate().reason);
+      currentJob.analysis = analyzeImportedGcode(currentJob.lines, {
+        travelX: workTravelX(), travelY: workTravelY(), sMax: machineSettings.sMax,
+        maxFeed: Math.min(machineSettings.maxRateX, machineSettings.maxRateY),
+        startPosition: positionState.work,
+      });
     }
     // An override from a previous session must not silently alter this job.
     await transport.sendRealtime(0x99, { confirmed: true });
@@ -1303,6 +1413,7 @@ startButton.addEventListener('click', runJob);
 pauseButton.addEventListener('click', togglePause);
 applyLivePowerButton.addEventListener('click', applyLivePower);
 abortButton.addEventListener('click', abortJob);
+$('#safetyAbortButton').addEventListener('click', abortJob);
 sdRefreshButton.addEventListener('click', refreshSdCard);
 recentSdRefresh.addEventListener('click', refreshSdCard);
 projectsSdRefresh.addEventListener('click', refreshSdCard);
@@ -1338,6 +1449,22 @@ modeCreate.addEventListener('click', () => showMode('create'));
 modeSend.addEventListener('click', () => showMode('send'));
 modeControl.addEventListener('click', () => showMode('control'));
 modeProjects.addEventListener('click', () => showMode('projects'));
+safetyDetailsToggle.addEventListener('click', () => {
+  const expanded = safetyDetailsToggle.getAttribute('aria-expanded') !== 'true';
+  safetyDetailsToggle.setAttribute('aria-expanded', String(expanded));
+  safetyBar.dataset.expanded = String(expanded);
+  safetyDetailsToggle.firstChild.textContent = expanded ? 'Hide details ' : 'Details ';
+});
+$('.mode-tabs').addEventListener('keydown', (event) => {
+  const tabs = [modeCreate, modeSend, modeControl, modeProjects];
+  const current = tabs.indexOf(event.target);
+  if (current < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+    : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[next].click();
+  tabs[next].focus();
+});
 $('#openProjectsFromCreate').addEventListener('click', () => showMode('projects'));
 window.addEventListener('laserlink:show-create', () => showMode('create'));
 $('#refreshPosition').addEventListener('click', refreshPosition);
@@ -1376,12 +1503,12 @@ $('#cancelJog').addEventListener('click', async () => {
 });
 window.addEventListener('laserlink:generated-job', (event) => {
   if (running) { setStatus('Wait for the current job to stop before preparing another.', 'error'); return; }
-  const { name, lines, bounds, sMax, jigId, origin } = event.detail;
+  const { name, lines, bounds, sMax, jigId, origin, power, speed, sValue, passes } = event.detail;
   if (!Array.isArray(lines) || !lines.length || lines.join('\n').length > 20 * 1024 * 1024) {
     setStatus('Generated job is too large. Use a coarser raster resolution.', 'error');
     return;
   }
-  job = { name, lines, generated: true, bounds, sMax, jigId, origin };
+  job = { name, lines, generated: true, bounds, sMax, jigId, origin, power, speed, sValue, passes };
   sdUploadStatus.textContent = 'Ready to copy this job to a selected card. Check its settings before running it.';
   sdFilename.value = name;
   jobName.textContent = name;

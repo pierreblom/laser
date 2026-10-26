@@ -1,11 +1,12 @@
 import qrcode from 'qrcode-generator';
 import JsBarcode from 'jsbarcode';
 import { rasterToGcode } from './gcode.mjs';
+import { mergeLayeredJobs, vectorLayersToGcode } from './vector-gcode.mjs';
 import { hitResizeCorner, moveRotatedBounds, pointInRotatedRect, resizeFromCorner, rotatedBounds } from './geometry.mjs';
 import { listLocalProjects, removeLocalProjects, saveLocalProject } from './project-store.mjs';
-import { assertMachineBounds, collectContourPaths } from './alignment.mjs';
+import { assertMachineBounds, collectContourPaths, transformContour } from './alignment.mjs';
 import { traceBinaryContours } from './contour-trace.mjs';
-import { extractSvgContours } from './svg-contours.mjs';
+import { extractLayeredCutSvg, extractSvgContours, hasLayeredCutGroups, svgLayerMarkup } from './svg-contours.mjs';
 
 const $ = (id) => document.getElementById(id);
 const BED = 300;
@@ -14,6 +15,7 @@ const rulerX = $('bedRulerX');
 const rulerY = $('bedRulerY');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const imageCache = new Map();
+const engraveImageCache = new Map();
 const processedCache = new Map();
 let project = { objects: [], selectedId: null, material: 'Unspecified', materialNote: '' };
 let history = [];
@@ -28,6 +30,8 @@ let autosaveTimer = null;
 let saveQueue = Promise.resolve();
 let selectingProjects = false;
 let preparedFingerprint = null;
+let objectListSignature = '';
+let settingsReturnFocus = null;
 let activeAlignment = { jig: null, origin: { x: 0, y: 0 }, measurement: null, outline: null };
 const selectedProjectIds = new Set();
 
@@ -41,7 +45,7 @@ function jobFingerprint(parameters = project.parameters) {
   const current = parameters || {};
   return JSON.stringify({ objects: project.objects, jobName: current.jobName, power: current.power,
     speed: current.speed, passes: current.passes, airAssist: current.airAssist,
-    sMax: current.sMax, resolution: current.resolution });
+    sMax: current.sMax, resolution: current.resolution, vector: current.vector });
 }
 function invalidatePreparedJob(parameters = project.parameters) {
   if (!preparedFingerprint || preparedFingerprint === jobFingerprint(parameters)) return;
@@ -66,6 +70,7 @@ function restore(index) {
   invalidatePreparedJob();
   window.dispatchEvent(new Event('laserlink:design-changed'));
   processedCache.clear();
+  engraveImageCache.clear();
   $('materialSelect').value = project.material || 'Unspecified';
   $('materialNote').value = project.materialNote || '';
   syncSelection();
@@ -79,6 +84,54 @@ async function ensureImage(object) {
   if (!object?.dataUrl) return null;
   if (imageCache.has(object.id)) return imageCache.get(object.id);
   return cacheImage(object);
+}
+
+async function ensureEngraveImage(object) {
+  if (!object?.engraveDataUrl) return null;
+  if (engraveImageCache.has(object.id)) return engraveImageCache.get(object.id);
+  const image = new Image();
+  const promise = new Promise((resolve, reject) => {
+    image.onload = () => { promise.image = image; resolve(image); };
+    image.onerror = () => reject(new Error('The engraving layer could not be decoded.'));
+  });
+  engraveImageCache.set(object.id, promise);
+  image.src = object.engraveDataUrl;
+  return promise;
+}
+
+function svgLengthMm(value) {
+  const match = String(value || '').trim().match(/^([0-9]*\.?[0-9]+)\s*(mm|cm|in|px|pt)?$/i);
+  if (!match) return null;
+  const number = Number(match[1]);
+  const unit = (match[2] || 'px').toLowerCase();
+  const scale = { mm: 1, cm: 10, in: 25.4, px: 25.4 / 96, pt: 25.4 / 72 }[unit];
+  return number * scale;
+}
+
+function svgPhysicalSize(root) {
+  const width = svgLengthMm(root.getAttribute('width'));
+  const height = svgLengthMm(root.getAttribute('height'));
+  if (!width || !height) throw new Error('A layered cut SVG needs explicit physical width and height, preferably in millimetres.');
+  if (width > BED + 0.001 || height > BED + 0.001) throw new Error('The layered SVG is larger than the 300 × 300 mm bed.');
+  return { width, height };
+}
+
+async function rasterizeSvgMarkup(markup, targetWidth, targetHeight) {
+  const url = URL.createObjectURL(new Blob([markup], { type: 'image/svg+xml' }));
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, 1600 / Math.max(targetWidth, targetHeight));
+    canvas.width = Math.max(1, Math.round(targetWidth * scale));
+    canvas.height = Math.max(1, Math.round(targetHeight * scale));
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/png');
+  } finally { URL.revokeObjectURL(url); }
 }
 
 function maskPath(context, shape, w, h) {
@@ -462,20 +515,53 @@ function objectBounds() {
   }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
 }
 
+function renderObjectList() {
+  const signature = JSON.stringify([project.selectedId, project.objects.map((object) =>
+    [object.id, object.kind, object.x, object.y, object.w, object.h])]);
+  if (signature === objectListSignature) return;
+  objectListSignature = signature;
+  const list = $('objectList');
+  list.replaceChildren();
+  if (!project.objects.length) {
+    const empty = document.createElement('p');
+    empty.textContent = 'No objects yet.';
+    list.append(empty);
+    return;
+  }
+  project.objects.forEach((object, index) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(object.id === project.selectedId));
+    option.innerHTML = `<span>${index + 1}</span><strong></strong><small></small>`;
+    option.querySelector('strong').textContent = object.kind || 'Artwork';
+    option.querySelector('small').textContent = `X ${object.x.toFixed(1)} · Y ${object.y.toFixed(1)} mm`;
+    option.addEventListener('click', () => {
+      project.selectedId = object.id;
+      syncSelection();
+      render();
+      hint(`${object.kind || 'Artwork'} selected. Use the position fields or focus the canvas and use arrow keys.`);
+    });
+    list.append(option);
+  });
+}
+
 function syncSelection() {
   const object = selected();
   const margin = object?.type === 'path' ? (object.stroke || 1) / 2 : 0;
   const bounds = object ? rotatedBounds(object, margin) : null;
   $('selectedSummary').textContent = object
     ? `${object.kind || 'Artwork'} · ${object.w.toFixed(1)} × ${object.h.toFixed(1)} mm artwork` +
-      (object.rotation ? ` · occupies ${bounds.width.toFixed(1)} × ${bounds.height.toFixed(1)} mm` : '')
+      (object.rotation ? ` · occupies ${bounds.width.toFixed(1)} × ${bounds.height.toFixed(1)} mm` : '') +
+      (object.lockedCutFile ? ' · physical size locked' : '')
     : 'Select an object on the grid to position it.';
   for (const [id, key] of [['objectX', 'x'], ['objectY', 'y'], ['objectW', 'w'], ['objectH', 'h'], ['objectRotation', 'rotation']]) {
-    $(id).disabled = !object;
+    $(id).disabled = !object || Boolean(object.lockedCutFile);
     const value = key === 'x' ? bounds?.minX : key === 'y' ? bounds?.minY : object?.[key];
     $(id).value = object ? (Math.abs(value || 0) < 0.05 ? 0 : value).toFixed(key === 'rotation' ? 0 : 1) : '';
   }
-  for (const id of ['flipHorizontal', 'flipVertical', 'deleteObject']) $(id).disabled = !object;
+  for (const id of ['flipHorizontal', 'flipVertical']) $(id).disabled = !object || Boolean(object.lockedCutFile);
+  $('deleteObject').disabled = !object;
   if (object?.type === 'image') {
     $('brightnessInput').value = object.brightness || 100;
     $('contrastInput').value = object.contrast || 100;
@@ -484,7 +570,12 @@ function syncSelection() {
     $('maskShape').value = object.mask || 'rectangle';
     for (const [i, id] of ['cropLeft', 'cropTop', 'cropRight', 'cropBottom'].entries()) $(id).value = object.crop?.[i] || 0;
     document.querySelectorAll('[data-filter]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.filter === (object.filter || 'original'))));
+    for (const id of ['brightnessInput', 'contrastInput', 'maskShape', 'cropLeft', 'cropTop', 'cropRight', 'cropBottom']) {
+      $(id).disabled = Boolean(object.lockedCutFile);
+    }
+    document.querySelectorAll('[data-filter]').forEach((button) => { button.disabled = Boolean(object.lockedCutFile); });
   }
+  renderObjectList();
 }
 
 async function addPictureFile(file) {
@@ -496,7 +587,7 @@ async function addPictureFile(file) {
     return;
   }
   try {
-    let svgBlob = file, svgRoot = null;
+    let svgBlob = file, svgRoot = null, layeredCut = false, svgCoordinateWidth = null, svgCoordinateHeight = null;
     if (svg) {
       const source = await file.text();
       const parsed = new DOMParser().parseFromString(source, 'image/svg+xml');
@@ -506,7 +597,15 @@ async function addPictureFile(file) {
       }
       const root = parsed.documentElement;
       svgRoot = root;
+      layeredCut = hasLayeredCutGroups(root);
+      if (layeredCut && project.objects.length) {
+        throw new Error('Start a new project before importing a layered cut SVG. Cut sheets cannot be mixed with other artwork.');
+      }
       const viewBox = root.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
+      if (viewBox?.length === 4 && viewBox[2] > 0 && viewBox[3] > 0) {
+        svgCoordinateWidth = viewBox[2];
+        svgCoordinateHeight = viewBox[3];
+      }
       if (viewBox?.length === 4 && viewBox[2] > 0 && viewBox[3] > 0 &&
         (!root.hasAttribute('width') || !root.hasAttribute('height') ||
           root.getAttribute('width').includes('%') || root.getAttribute('height').includes('%'))) {
@@ -539,22 +638,36 @@ async function addPictureFile(file) {
     imageContext.fillStyle = '#fff'; imageContext.fillRect(0, 0, asset.width, asset.height);
     imageContext.drawImage(bitmap, 0, 0, asset.width, asset.height);
     bitmap.close?.();
-    const width = Math.min(120, 120 * asset.width / Math.max(asset.width, asset.height));
-    const height = Math.min(120, 120 * asset.height / Math.max(asset.width, asset.height));
-    let contours = null, contourNote = '';
-    if (svgRoot) {
+    let width = Math.min(120, 120 * asset.width / Math.max(asset.width, asset.height));
+    let height = Math.min(120, 120 * asset.height / Math.max(asset.width, asset.height));
+    let contours = null, contourNote = '', vectorLayers = null, engraveDataUrl = null;
+    if (svgRoot && layeredCut) {
+      const physical = svgPhysicalSize(svgRoot);
+      width = physical.width; height = physical.height;
+      vectorLayers = extractLayeredCutSvg(svgRoot, svgCoordinateWidth || sourceWidth, svgCoordinateHeight || sourceHeight);
+      if (vectorLayers.counts.engrave) {
+        engraveDataUrl = await rasterizeSvgMarkup(svgLayerMarkup(svgRoot, 'engrave'), sourceWidth, sourceHeight);
+      }
+      contourNote = ` Recognized ${vectorLayers.counts.engrave || 0} engraving, ${vectorLayers.counts.score || 0} score, ` +
+        `${vectorLayers.counts.cutInner || 0} inner-cut, and ${vectorLayers.counts.cutOuter || 0} outer-cut shapes. ` +
+        `${vectorLayers.counts.labels || 0} label shapes will not output.`;
+    } else if (svgRoot) {
       try {
-        const result = extractSvgContours(svgRoot, sourceWidth, sourceHeight);
+        const result = extractSvgContours(svgRoot, svgCoordinateWidth || sourceWidth, svgCoordinateHeight || sourceHeight);
         contours = result.skipped ? null : result.contours;
         contourNote = result.skipped ? ` This SVG has ${result.skipped} unsupported shape(s), so contour tracing is unavailable for it.` : '';
       } catch (error) { contourNote = ` Contour tracing unavailable: ${error.message}`; }
     }
-    addObject({ id: uid(), type: 'image', kind: 'Picture', dataUrl: asset.toDataURL('image/png'),
-      contours,
+    if (layeredCut) project.parameters.jobName = `${safeName(file.name.replace(/\.svg$/i, ''), 'layered-cut')}.nc`;
+    addObject({ id: uid(), type: 'image', kind: layeredCut ? 'Layered SVG cut file' : 'Picture',
+      dataUrl: asset.toDataURL('image/png'), contours, vectorLayers, engraveDataUrl,
+      lockedCutFile: layeredCut,
       x: (BED - width) / 2, y: (BED - height) / 2, w: width, h: height,
       rotation: 0, flipX: false, flipY: false, filter: 'original', brightness: 100,
       contrast: 100, crop: [0, 0, 0, 0], mask: 'rectangle' });
-    hint(`Imported ${file.name}${svg ? ' and retained supported contours for tracing' : ''}. Drag the image to move it, or drag a green corner to resize it.${contourNote}`);
+    hint(layeredCut
+      ? `Imported ${file.name} at ${width.toFixed(1)} × ${height.toFixed(1)} mm.${contourNote} Open settings to review every operation before preparing the job.`
+      : `Imported ${file.name}${svg ? ' and retained supported contours for tracing' : ''}. Drag the image to move it, or drag a green corner to resize it.${contourNote}`);
   } catch (error) { hint(`Picture import failed: ${error.message}`); }
 }
 
@@ -647,7 +760,7 @@ function hitObject(point) {
 
 function resizeHandleAt(point) {
   const rect = canvas.getBoundingClientRect();
-  return hitResizeCorner(point, selected(), 15 / rect.width * BED);
+  return selected()?.lockedCutFile ? null : hitResizeCorner(point, selected(), 15 / rect.width * BED);
 }
 
 canvas.addEventListener('pointerdown', (event) => {
@@ -667,7 +780,9 @@ canvas.addEventListener('pointerdown', (event) => {
   }
   const object = hitObject(point);
   project.selectedId = object?.id || null;
-  pointerAction = object ? { type: 'drag', start: point, x: object.x, y: object.y, changed: false } : null;
+  pointerAction = object && !object.lockedCutFile
+    ? { type: 'drag', start: point, x: object.x, y: object.y, changed: false }
+    : null;
   if (pointerAction) canvas.setPointerCapture(event.pointerId);
   syncSelection(); render();
 });
@@ -730,10 +845,53 @@ canvas.addEventListener('pointercancel', () => {
   canvas.style.cursor = 'crosshair';
 });
 
-document.querySelectorAll('[data-tool]').forEach((button) => button.addEventListener('click', () => {
-  document.querySelectorAll('[data-tool]').forEach((item) => item.setAttribute('aria-selected', String(item === button)));
+function deleteSelectedObject() {
+  if (!selected()) return;
+  project.objects = project.objects.filter((object) => object.id !== project.selectedId);
+  project.selectedId = null;
+  syncSelection(); commit(); render();
+  hint('Object deleted.');
+}
+
+canvas.addEventListener('keydown', (event) => {
+  const object = selected();
+  if (!object) return;
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    event.preventDefault();
+    deleteSelectedObject();
+    return;
+  }
+  const directions = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+  if (!directions[event.key]) return;
+  event.preventDefault();
+  if (object.lockedCutFile) { hint('Layered cut files stay at their imported physical size and position.'); return; }
+  const step = event.shiftKey ? 10 : 1;
+  const [dx, dy] = directions[event.key];
+  const margin = object.type === 'path' ? (object.stroke || 1) / 2 : 0;
+  const bounds = rotatedBounds(object, margin);
+  Object.assign(object, moveRotatedBounds(object, bounds.minX + dx * step, bounds.minY + dy * step, BED, margin));
+  syncSelection(); commit(); render();
+  hint(`${object.kind || 'Artwork'} moved to X ${object.x.toFixed(1)}, Y ${object.y.toFixed(1)} mm.`);
+});
+
+function selectTool(button, focus = false) {
+  document.querySelectorAll('[data-tool]').forEach((item) => {
+    item.setAttribute('aria-selected', String(item === button));
+    item.tabIndex = item === button ? 0 : -1;
+  });
   document.querySelectorAll('[data-panel]').forEach((panel) => { panel.hidden = panel.dataset.panel !== button.dataset.tool; });
-}));
+  if (focus) button.focus();
+}
+document.querySelectorAll('[data-tool]').forEach((button) => button.addEventListener('click', () => selectTool(button)));
+document.querySelector('.tool-tabs').addEventListener('keydown', (event) => {
+  const tabs = [...document.querySelectorAll('[data-tool]')];
+  const current = tabs.indexOf(event.target);
+  if (current < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+    : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+  selectTool(tabs[next], true);
+});
 $('addPicture').addEventListener('click', () => $('pictureInput').click());
 $('pictureInput').addEventListener('change', () => { addPictureFile($('pictureInput').files?.[0]); $('pictureInput').value = ''; });
 $('addText').addEventListener('click', addTextObject);
@@ -755,28 +913,30 @@ $('materialNote').addEventListener('change', () => { project.materialNote = $('m
 
 document.querySelectorAll('[data-filter]').forEach((button) => button.addEventListener('click', () => {
   const object = selected(); if (!object || object.type !== 'image') { hint('Select a picture or code first.'); return; }
+  if (object.lockedCutFile) { hint('Layered cut-file colours define its operations and cannot be filtered.'); return; }
   object.filter = button.dataset.filter; processedCache.clear(); syncSelection(); commit(); render();
 }));
 for (const [id, key, output] of [['brightnessInput', 'brightness', 'brightnessValue'], ['contrastInput', 'contrast', 'contrastValue']]) {
   $(id).addEventListener('input', () => {
     $(output).value = `${$(id).value}%`;
-    const object = selected(); if (!object || object.type !== 'image') return;
+    const object = selected(); if (!object || object.type !== 'image' || object.lockedCutFile) return;
     object[key] = Number($(id).value); processedCache.clear(); render();
   });
-  $(id).addEventListener('change', () => { if (selected()) commit(); });
+  $(id).addEventListener('change', () => { if (selected() && !selected().lockedCutFile) commit(); });
 }
 for (const id of ['cropLeft', 'cropTop', 'cropRight', 'cropBottom']) $(id).addEventListener('change', () => {
-  const object = selected(); if (!object || object.type !== 'image') return;
+  const object = selected(); if (!object || object.type !== 'image' || object.lockedCutFile) return;
   const values = ['cropLeft', 'cropTop', 'cropRight', 'cropBottom'].map((key) => clamp(Number($(key).value) || 0, 0, 80));
   if (values[0] + values[2] >= 95 || values[1] + values[3] >= 95) { hint('Crop must leave at least 5% of the picture.'); syncSelection(); return; }
   object.crop = values; processedCache.clear(); commit(); render();
 });
 $('maskShape').addEventListener('change', () => {
-  const object = selected(); if (!object || object.type !== 'image') return;
+  const object = selected(); if (!object || object.type !== 'image' || object.lockedCutFile) return;
   object.mask = $('maskShape').value; commit(); render();
 });
 for (const [id, key] of [['objectX', 'x'], ['objectY', 'y'], ['objectW', 'w'], ['objectH', 'h'], ['objectRotation', 'rotation']]) $(id).addEventListener('change', () => {
   const object = selected(); if (!object) return;
+  if (object.lockedCutFile) { syncSelection(); hint('Layered cut files stay at their imported physical size and position.'); return; }
   const value = Number($(id).value);
   if (!Number.isFinite(value)) { syncSelection(); return; }
   const before = { ...object };
@@ -796,11 +956,7 @@ for (const [id, key] of [['objectX', 'x'], ['objectY', 'y'], ['objectW', 'w'], [
 });
 $('flipHorizontal').addEventListener('click', () => { const object = selected(); if (object) { object.flipX = !object.flipX; commit(); render(); } });
 $('flipVertical').addEventListener('click', () => { const object = selected(); if (object) { object.flipY = !object.flipY; commit(); render(); } });
-$('deleteObject').addEventListener('click', () => {
-  if (!selected()) return;
-  project.objects = project.objects.filter((object) => object.id !== project.selectedId);
-  project.selectedId = null; syncSelection(); commit(); render();
-});
+$('deleteObject').addEventListener('click', deleteSelectedObject);
 $('undoEdit').addEventListener('click', () => restore(historyIndex - 1));
 $('redoEdit').addEventListener('click', () => restore(historyIndex + 1));
 
@@ -812,6 +968,22 @@ function download(name, content, mime) {
 }
 function safeName(value, fallback) {
   return String(value || fallback).replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80) || fallback;
+}
+function validVectorLayers(layers) {
+  if (!layers || typeof layers !== 'object') return false;
+  let pathCount = 0, pointCount = 0;
+  for (const operation of ['score', 'cutInner', 'cutOuter']) {
+    if (!Array.isArray(layers[operation])) return false;
+    pathCount += layers[operation].length;
+    if (pathCount > 10000) return false;
+    for (const path of layers[operation]) {
+      if (!Array.isArray(path) || path.length < 2) return false;
+      pointCount += path.length;
+      if (pointCount > 250000 || path.some((point) => !Array.isArray(point) || point.length !== 2 ||
+        point.some((value) => !Number.isFinite(value) || value < -0.01 || value > 1.01))) return false;
+    }
+  }
+  return Boolean(layers.cutInner.length || layers.cutOuter.length || layers.score.length);
 }
 function validProjectObject(object) {
   if (!object || typeof object !== 'object' || !['image', 'path'].includes(object.type) ||
@@ -825,6 +997,8 @@ function validProjectObject(object) {
       bounds.maxX > BED + 0.001 || bounds.maxY > BED + 0.001) return false;
   if (object.type === 'image') {
     return typeof object.dataUrl === 'string' && /^data:image\/(png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(object.dataUrl) &&
+      (!object.lockedCutFile || (validVectorLayers(object.vectorLayers) &&
+        (!object.engraveDataUrl || /^data:image\/png;base64,[a-z0-9+/=]+$/i.test(object.engraveDataUrl)))) &&
       (!object.contours || (Array.isArray(object.contours) && object.contours.length <= 1000 &&
         object.contours.reduce((count, path) => count + (Array.isArray(path) ? path.length : 12001), 0) <= 12000 &&
         object.contours.every((path) => Array.isArray(path) && path.length >= 2 &&
@@ -841,11 +1015,15 @@ function validProjectObject(object) {
 function freshProject() {
   return { version: 1, id: uid(), objects: [], selectedId: null, material: 'Unspecified', materialNote: '',
     parameters: { power: 5, speed: 1000, passes: 1, framePower: 5, airAssist: false,
-      sMax: 1000, resolution: 0.3, jobName: 'laser-link-job.nc' } };
+      sMax: 1000, resolution: 0.3, jobName: 'laser-link-job.nc', vector: {
+        engraveOutput: true, engravePower: 30, engraveSpeed: 3000, engravePasses: 1,
+        scoreOutput: true, scorePower: 20, scoreSpeed: 1500, scorePasses: 1,
+        cutOutput: true, cutPower: 100, cutSpeed: 180, cutPasses: 1, cutAirAssist: true,
+      } } };
 }
 $('newProject').addEventListener('click', () => {
   if (project.objects.length && !window.confirm('Start a new design? Save this project first if you want to keep it.')) return;
-  project = freshProject(); imageCache.clear(); processedCache.clear();
+  project = freshProject(); imageCache.clear(); engraveImageCache.clear(); processedCache.clear();
   history = []; historyIndex = -1; framePreview = false;
   syncSelection(); commit(); render(); hint('New 300 × 300 mm project ready.');
 });
@@ -861,9 +1039,11 @@ function acceptProject(loaded, label) {
     throw new Error('This is not a supported Laser Link project.');
   }
   clearTimeout(autosaveTimer);
-  project = { ...freshProject(), ...loaded, id: typeof loaded.id === 'string' && loaded.id.length < 100 ? loaded.id : uid(),
-    parameters: { ...freshProject().parameters, ...(loaded.parameters || {}) } };
-  imageCache.clear(); processedCache.clear(); history = []; historyIndex = -1;
+  const defaults = freshProject();
+  project = { ...defaults, ...loaded, id: typeof loaded.id === 'string' && loaded.id.length < 100 ? loaded.id : uid(),
+    parameters: { ...defaults.parameters, ...(loaded.parameters || {}),
+      vector: { ...defaults.parameters.vector, ...(loaded.parameters?.vector || {}) } } };
+  imageCache.clear(); engraveImageCache.clear(); processedCache.clear(); history = []; historyIndex = -1;
   project.selectedId = null;
   $('materialSelect').value = project.material;
   $('materialNote').value = project.materialNote || '';
@@ -915,11 +1095,40 @@ function readParameterForm() {
     passes: Number($('passes').value), framePower: Number($('framePower').value),
     airAssist: $('airAssist').checked, sMax: Number($('sMaxInput').value),
     resolution: Number($('resolution').value),
+    vector: {
+      engraveOutput: $('engraveOutput').checked,
+      engravePower: Number($('engravePower').value), engraveSpeed: Number($('engraveSpeed').value),
+      engravePasses: Number($('engravePasses').value),
+      scoreOutput: $('scoreOutput').checked,
+      scorePower: Number($('scorePower').value), scoreSpeed: Number($('scoreSpeed').value),
+      scorePasses: Number($('scorePasses').value),
+      cutOutput: $('cutOutput').checked,
+      cutPower: Number($('cutPower').value), cutSpeed: Number($('cutSpeed').value),
+      cutPasses: Number($('cutPasses').value), cutAirAssist: $('cutAirAssist').checked,
+    },
   };
+}
+
+function layeredCutObject() {
+  return project.objects.length === 1 && project.objects[0].lockedCutFile && project.objects[0].vectorLayers
+    ? project.objects[0]
+    : null;
+}
+function setWorkspaceInert(inert) {
+  document.querySelectorAll('#appShell > :not(#settingsDialog)').forEach((element) => { element.inert = inert; });
+}
+function hideSettingsDialog({ restoreFocus = true } = {}) {
+  $('settingsDialog').hidden = true;
+  setWorkspaceInert(false);
+  if (restoreFocus && settingsReturnFocus?.isConnected) settingsReturnFocus.focus();
+  settingsReturnFocus = null;
 }
 function openSettings() {
   if (!project.objects.length) { hint('Add a picture, text, drawing, QR code, or barcode first.'); return; }
-  const parameters = project.parameters || freshProject().parameters;
+  const defaults = freshProject().parameters;
+  const parameters = project.parameters || defaults;
+  const vector = { ...defaults.vector, ...(parameters.vector || {}) };
+  const cutFile = layeredCutObject();
   $('jobFileName').value = parameters.jobName;
   $('laserPower').value = parameters.power;
   $('workSpeed').value = parameters.speed;
@@ -927,18 +1136,46 @@ function openSettings() {
   $('framePower').value = parameters.framePower;
   $('airAssist').checked = parameters.airAssist;
   $('resolution').value = String(parameters.resolution);
+  for (const [id, key] of [
+    ['engraveOutput', 'engraveOutput'], ['engravePower', 'engravePower'],
+    ['engraveSpeed', 'engraveSpeed'], ['engravePasses', 'engravePasses'],
+    ['scoreOutput', 'scoreOutput'], ['scorePower', 'scorePower'], ['scoreSpeed', 'scoreSpeed'],
+    ['scorePasses', 'scorePasses'], ['cutOutput', 'cutOutput'], ['cutPower', 'cutPower'],
+    ['cutSpeed', 'cutSpeed'], ['cutPasses', 'cutPasses'], ['cutAirAssist', 'cutAirAssist'],
+  ]) {
+    if ($(id).type === 'checkbox') $(id).checked = Boolean(vector[key]);
+    else $(id).value = vector[key];
+  }
+  $('vectorSettings').hidden = !cutFile;
+  document.querySelectorAll('[data-raster-only]').forEach((element) => { element.hidden = Boolean(cutFile); });
+  $('settingsTitle').textContent = cutFile ? 'Prepare layered SVG cut' : 'Prepare engraving';
+  if (cutFile) {
+    const counts = cutFile.vectorLayers.counts || {};
+    $('vectorLayerSummary').textContent = `${counts.engrave || 0} engraving shapes · ${counts.score || 0} score paths · ` +
+      `${counts.cutInner || 0} inner cuts · ${counts.cutOuter || 0} outer cuts · green labels excluded`;
+    $('engraveOutput').disabled = !counts.engrave;
+    $('scoreOutput').disabled = !counts.score;
+    $('cutOutput').disabled = !(counts.cutInner || counts.cutOuter);
+    if (!counts.engrave) $('engraveOutput').checked = false;
+    if (!counts.score) $('scoreOutput').checked = false;
+    if (!(counts.cutInner || counts.cutOuter)) $('cutOutput').checked = false;
+  }
   $('sMaxInput').value = machineSettings?.sMax || parameters.sMax;
   $('machineConfig').textContent = machineSettings
     ? `Controller: $30=${machineSettings.sMax}, $32=${machineSettings.laserMode ?? 'unknown'}, travel ${machineSettings.travelX || '?'} × ${machineSettings.travelY || '?'} mm.`
     : 'Connect the laser to read its actual $30 and $32 settings.';
-  settingsMessage('Screenshot example: 5% power, 1000 mm/min, one pass, M4. Preview the job before sending.');
+  settingsMessage(cutFile
+    ? 'Verify these starting values on scrap. The job runs engraving, scoring, inner cuts, then outer cuts.'
+    : 'Screenshot example: 5% power, 1000 mm/min, one pass, M4. Preview the job before sending.');
+  settingsReturnFocus = document.activeElement;
+  setWorkspaceInert(true);
   $('settingsDialog').hidden = false;
   $('jobFileName').focus();
 }
 function closeSettings() {
   project.parameters = readParameterForm();
   commit();
-  $('settingsDialog').hidden = true;
+  hideSettingsDialog();
 }
 $('settingsDialog').addEventListener('input', () => invalidatePreparedJob(readParameterForm()));
 $('settingsDialog').addEventListener('change', () => invalidatePreparedJob(readParameterForm()));
@@ -947,7 +1184,19 @@ window.addEventListener('laserlink:open-settings', openSettings);
 $('closeSettings').addEventListener('click', closeSettings);
 $('settingsDialog').addEventListener('click', (event) => { if (event.target === $('settingsDialog')) closeSettings(); });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !$('settingsDialog').hidden) closeSettings();
+  if ($('settingsDialog').hidden) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeSettings();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = [...$('settingsDialog').querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])')]
+    .filter((element) => !element.hidden && element.getClientRects().length);
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 });
 window.addEventListener('laserlink:machine-settings', (event) => {
   machineSettings = event.detail;
@@ -978,6 +1227,8 @@ async function buildJob() {
     throw new Error('Connect and home the laser to calculate this jig’s work-coordinate offset.');
   }
   project.parameters = parameters;
+  const cutFile = layeredCutObject();
+  if (cutFile) return buildLayeredCutJob(cutFile, parameters);
   await Promise.all(project.objects.filter((object) => object.type === 'image').map(ensureImage));
   const size = Math.round(BED / parameters.resolution);
   const raster = document.createElement('canvas'); raster.width = raster.height = size;
@@ -997,6 +1248,62 @@ async function buildJob() {
     assertMachineBounds(result.bounds, activeAlignment.wco, activeAlignment.limits, activeAlignment.jig);
   }
   return { ...result, parameters };
+}
+
+async function buildLayeredCutJob(object, parameters) {
+  const vector = parameters.vector || {};
+  const originX = activeAlignment.origin?.x || 0;
+  const originY = activeAlignment.origin?.y || 0;
+  let rasterJob = null;
+  if (vector.engraveOutput && object.engraveDataUrl) {
+    const image = await ensureEngraveImage(object);
+    const size = Math.round(BED / parameters.resolution);
+    const raster = document.createElement('canvas'); raster.width = raster.height = size;
+    const context = raster.getContext('2d', { willReadFrequently: true });
+    context.fillStyle = '#fff'; context.fillRect(0, 0, size, size);
+    const scale = size / BED;
+    const centerX = (object.x + object.w / 2) * scale;
+    const centerY = (BED - object.y - object.h / 2) * scale;
+    context.save(); context.translate(centerX, centerY);
+    context.rotate(-(object.rotation || 0) * Math.PI / 180);
+    context.scale(object.flipX ? -1 : 1, object.flipY ? -1 : 1);
+    context.drawImage(image, -object.w * scale / 2, -object.h * scale / 2,
+      object.w * scale, object.h * scale);
+    context.restore();
+    const rgba = context.getImageData(0, 0, size, size).data;
+    const pixels = new Uint8Array(size * size);
+    let darkPixels = 0;
+    for (let i = 0; i < pixels.length; i++) {
+      const offset = i * 4;
+      pixels[i] = 0.2126 * rgba[offset] + 0.7152 * rgba[offset + 1] + 0.0722 * rgba[offset + 2] < 128 ? 1 : 0;
+      darkPixels += pixels[i];
+    }
+    if (darkPixels) rasterJob = rasterToGcode({ pixels, width: size, height: size,
+      stepMm: parameters.resolution, powerPercent: vector.engravePower,
+      speedMmMin: vector.engraveSpeed, passes: vector.engravePasses,
+      sMax: parameters.sMax, airAssist: false, originX, originY });
+  }
+
+  const source = object.vectorLayers;
+  const layers = {
+    score: vector.scoreOutput ? source.score.map((path) => transformContour(object, path)) : [],
+    cutInner: vector.cutOutput ? source.cutInner.map((path) => transformContour(object, path)) : [],
+    cutOuter: vector.cutOutput ? source.cutOuter.map((path) => transformContour(object, path)) : [],
+  };
+  const hasVectors = layers.score.length || layers.cutInner.length || layers.cutOuter.length;
+  const vectorJob = hasVectors ? vectorLayersToGcode({ layers, sMax: parameters.sMax, originX, originY,
+    includePreamble: !rasterJob,
+    settings: {
+      score: { powerPercent: vector.scorePower, speedMmMin: vector.scoreSpeed,
+        passes: vector.scorePasses, airAssist: false },
+      cut: { powerPercent: vector.cutPower, speedMmMin: vector.cutSpeed,
+        passes: vector.cutPasses, airAssist: vector.cutAirAssist },
+    } }) : null;
+  const result = mergeLayeredJobs({ raster: rasterJob, vector: vectorJob });
+  if (activeAlignment.jig) {
+    assertMachineBounds(result.bounds, activeAlignment.wco, activeAlignment.limits, activeAlignment.jig);
+  }
+  return { ...result, parameters, layered: true };
 }
 
 function textContours(object, image) {
@@ -1074,7 +1381,9 @@ $('downloadGcode').addEventListener('click', async () => {
     if (contents.length > 20 * 1024 * 1024) throw new Error('Job exceeds 20 MB. Choose a coarser raster resolution.');
     download(job.parameters.jobName, contents, 'text/plain');
     commit();
-    settingsMessage(`Downloaded ${job.parameters.jobName}: ${job.segments.toLocaleString()} dark runs, S${job.sValue}. Check orientation and origin in LightBurn before use.`);
+    settingsMessage(job.layered
+      ? `Downloaded ${job.parameters.jobName}: ${job.segments.toLocaleString()} engraving/cut moves, maximum S${job.sValue}. Review it before running.`
+      : `Downloaded ${job.parameters.jobName}: ${job.segments.toLocaleString()} dark runs, S${job.sValue}. Check orientation and origin before use.`);
   } catch (error) { settingsMessage(error.message, true); }
 });
 $('prepareJob').addEventListener('click', async () => {
@@ -1086,13 +1395,24 @@ $('prepareJob').addEventListener('click', async () => {
     }
     const contentsLength = job.lines.join('\n').length;
     if (contentsLength > 20 * 1024 * 1024) throw new Error('Job exceeds 20 MB. Choose a coarser raster resolution.');
-    commit(); $('settingsDialog').hidden = true;
+    commit(); hideSettingsDialog();
     preparedFingerprint = jobFingerprint();
+    const enabledVector = job.layered ? [
+      job.parameters.vector.engraveOutput && { power: job.parameters.vector.engravePower, speed: job.parameters.vector.engraveSpeed, passes: job.parameters.vector.engravePasses },
+      job.parameters.vector.scoreOutput && { power: job.parameters.vector.scorePower, speed: job.parameters.vector.scoreSpeed, passes: job.parameters.vector.scorePasses },
+      job.parameters.vector.cutOutput && { power: job.parameters.vector.cutPower, speed: job.parameters.vector.cutSpeed, passes: job.parameters.vector.cutPasses },
+    ].filter(Boolean) : [];
+    const displayPower = job.layered ? Math.max(...enabledVector.map((item) => item.power)) : job.parameters.power;
+    const displaySpeed = job.layered ? Math.min(...enabledVector.map((item) => item.speed)) : job.parameters.speed;
+    const displayPasses = job.layered ? Math.max(...enabledVector.map((item) => item.passes)) : job.parameters.passes;
     window.dispatchEvent(new CustomEvent('laserlink:generated-job', { detail: {
       name: job.parameters.jobName, lines: job.lines, bounds: job.bounds, sMax: job.parameters.sMax,
       jigId: activeAlignment.jig?.id || '', origin: activeAlignment.origin || { x: 0, y: 0 },
+      power: displayPower, speed: displaySpeed, passes: displayPasses, sValue: job.sValue,
     } }));
-    hint(`Prepared ${job.segments.toLocaleString()} dark runs. Review the sender before starting.`);
+    hint(job.layered
+      ? `Prepared ${job.segments.toLocaleString()} engraving, scoring, and cutting moves. Review the sender before starting.`
+      : `Prepared ${job.segments.toLocaleString()} dark runs. Review the sender before starting.`);
   } catch (error) { settingsMessage(error.message, true); }
 });
 

@@ -78,3 +78,12 @@ test('feed hold does not split a long G-code line into two writes', async () => 
   assert.equal(writes.at(-1), '!');
   assert.equal(writes.slice(0, -1).join(''), `G1 X${'1'.repeat(55)}\n`);
 });
+
+test('disconnect cancellation rejects pending command and status state', async () => {
+  const transport = new GrblTransport(async () => {}, async () => {});
+  const command = transport.sendCommand('G1 X1');
+  const status = transport.queryStatus();
+  transport.cancel(new Error('mock disconnect'));
+  await assert.rejects(command, /mock disconnect/);
+  await assert.rejects(status, /mock disconnect/);
+});

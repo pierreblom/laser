@@ -29,6 +29,7 @@
 .bed-ruler-x .ruler-label.major,.bed-ruler-y .ruler-label.major{color:#d7e6db;font-weight:750}
 .board-shell{grid-column:2;grid-row:2;min-width:0;border-radius:4px;overflow:hidden;background:#f7f8f5;line-height:0;touch-action:none}
 #editorCanvas{display:block;width:100%;aspect-ratio:1;cursor:crosshair;touch-action:none}
+#editorCanvas:focus-visible{outline:4px solid #6b8d2f!important;outline-offset:-4px!important}
 .editor-hint{font-size:12px;color:#a9bbb1;margin:12px 3px 3px;line-height:1.5;min-height:20px}
 .locate-panel{margin-top:15px;padding:16px;border:1px solid #3c5145;border-radius:11px;background:#1e2b27}
 .locate-panel h3{margin:0 0 5px;font-size:16px}
@@ -39,7 +40,7 @@
 .locate-panel .control-hint{margin-top:12px}
 .editor-sidebar{flex:0 1 clamp(320px,27vw,420px);min-width:280px;max-width:420px;padding:0 19px 18px}
 .tool-tabs{display:flex;flex-wrap:wrap;gap:3px;border-bottom:1px solid var(--line);margin:0 -19px;padding:12px 10px}
-.tool-tabs button{flex:1 1 50px;border:0;background:transparent;color:#a6b5ad;font-size:11px;font-weight:750;padding:10px 3px;border-radius:7px;cursor:pointer}
+.tool-tabs button{flex:1 1 50px;min-height:44px;border:0;background:transparent;color:#a6b5ad;font-size:11px;font-weight:750;padding:10px 3px;border-radius:7px;cursor:pointer}
 .tool-tabs button[aria-selected="true"]{color:#19251c;background:var(--accent)}
 .tool-panel{padding:14px 0 20px;min-height:200px;border-bottom:1px solid var(--line)}
 .tool-panel h3,.selection-panel h3{font-size:18px;letter-spacing:-.03em;margin:2px 0 5px}
@@ -58,6 +59,11 @@
 .four-fields label{flex:1 1 calc((100% - 8px)/2);min-width:100px;display:block;font-size:10px;font-weight:700;color:#aebeb2}
 .four-fields input{margin-top:5px}
 .selection-panel{padding-top:20px}
+.object-list{display:grid;gap:5px;max-height:190px;overflow:auto;margin:12px 0 15px;padding:5px;border:1px solid var(--line);border-radius:9px;background:#121a1b}
+.object-list>p{margin:5px!important;padding:8px;color:#82918a!important;text-align:center}
+.object-list button{display:grid;grid-template-columns:26px 1fr;gap:1px 7px;width:100%;min-height:48px;padding:8px;border:1px solid transparent;border-radius:7px;background:#1d2829;color:var(--text);font:inherit;text-align:left;cursor:pointer}
+.object-list button:hover{background:#293536}.object-list button[aria-selected="true"]{border-color:var(--accent);background:#273324}
+.object-list button>span{grid-row:1 / span 2;display:grid;place-items:center;width:24px;height:24px;border-radius:6px;background:#34413f;color:#c8d4cd;font-size:10px;font-weight:800}.object-list button>strong{font-size:12px}.object-list button>small{color:#92a29a;font-size:10px}
 .selection-actions{display:flex;gap:6px;margin-top:14px}
 .selection-actions button{flex:1;padding:9px 2px;font-size:11px}
 .selection-actions button:last-child{color:#ffad9d;border-color:#70453c}
@@ -67,11 +73,15 @@
 .settings-card{width:min(720px,100%);max-height:min(900px,calc(100vh - 40px));overflow:auto;background:#1d2728;border:1px solid #53625c;border-radius:18px;padding:27px;box-shadow:0 28px 80px #0009}
 .settings-head{display:flex;justify-content:space-between;gap:10px;align-items:start}
 .settings-head h2{font-size:28px;letter-spacing:-.04em;margin:6px 0 15px}
-.settings-head button{background:#303d3b;border:1px solid var(--line);color:var(--text);border-radius:8px;font-size:25px;width:34px;height:34px;cursor:pointer}
+.settings-head button{background:#303d3b;border:1px solid var(--line);color:var(--text);border-radius:8px;font-size:25px;width:44px;height:44px;cursor:pointer}
 .settings-grid{display:flex;flex-wrap:wrap;gap:16px}
 .settings-grid>label{flex:1 1 250px;min-width:0;font-size:12px;font-weight:750;color:#cfdbd1}
 .settings-grid input:not([type="checkbox"]),.settings-grid select{display:block;margin-top:7px}
 .settings-grid small{display:block;color:#96a79c;font-size:10px;font-weight:400;line-height:1.4;margin-top:5px}
+.vector-settings{margin-top:22px;padding-top:20px;border-top:1px solid #43504c}
+.vector-settings h3{margin:0 0 5px}
+.vector-settings>.tiny{margin:0 0 16px}
+.settings-card [hidden]{display:none!important}
 .toggle-field{display:flex!important;align-items:center;gap:9px;flex-wrap:wrap}
 .toggle-field input{accent-color:var(--accent);width:18px;height:18px}
 .toggle-field small{width:100%}
@@ -150,3 +160,16 @@
 @media(max-width:620px){.projects-grid .project-card{flex-basis:calc((100% - 14px)/2);min-width:0}.section-heading{align-items:start}.section-heading h2{font-size:28px}.jog-grid{grid-template-columns:repeat(3,65px)}.jog-grid button{height:60px}.mode-tabs button{flex-basis:calc((100% - 8px)/2);min-width:0}}
 @media(max-width:420px){.projects-grid .project-card{flex-basis:100%}}
 @media(max-width:620px){.creator-top h2{font-size:28px}.creator-actions>button{flex:1}.creator-actions>.button{flex-basis:100%}.board-column{padding:8px}.board-toolbar{font-size:10px}.settings-actions .button{flex:1}}
+
+/* Task-first workspace refinements */
+.locate-panel{padding:0}.locate-panel-body{padding:0 16px 16px}.locate-panel-body>p:first-child{margin-top:0}.control-disclosure{padding:0}.control-disclosure .disclosure-body{padding:0 18px 18px}.control-disclosure .disclosure-body h3{margin-top:18px}
+.inline-disclosure .origin-setup{margin-top:0;padding:0 16px 16px;border:0;background:transparent}.inline-disclosure .origin-setup p:first-child{margin-top:0}
+@media(min-width:971px){.editor-sidebar{position:sticky;top:86px;max-height:calc(100vh - 100px);overflow:auto;scrollbar-width:thin}.tool-tabs{position:sticky;top:0;z-index:4;background:var(--panel)}}
+@media(max-width:620px){.mode-tabs{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin}.mode-tabs button{flex:0 0 auto;min-width:max-content;padding-inline:16px}.creator-actions{width:100%;flex-wrap:nowrap;overflow-x:auto;padding:3px 3px 8px;justify-content:flex-start;scrollbar-width:thin}.creator-actions>button{flex:0 0 auto}.creator-actions>.button{flex-basis:auto;margin-left:auto}.tool-tabs{flex-wrap:nowrap;overflow-x:auto}.tool-tabs button{flex:0 0 74px}}
+@media(max-width:620px){
+  .creator-actions{display:grid;grid-template-columns:.7fr 1.2fr 1.2fr 44px 44px;gap:6px;width:100%;overflow:visible;padding:0}
+  .creator-actions>button{min-width:0;padding-inline:8px;font-size:11.5px}
+  .creator-actions>.button{grid-column:1/-1;width:100%;margin-left:0}
+  .mode-tabs,.tool-tabs{scrollbar-width:none}
+  .mode-tabs::-webkit-scrollbar,.tool-tabs::-webkit-scrollbar{display:none}
+}
